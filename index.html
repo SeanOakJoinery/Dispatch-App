@@ -1,0 +1,1758 @@
+<!DOCTYPE html>
+<!--
+========================================================================
+OAK JOINERY STOCK BOARD — INTERNAL BUILD NOTES (read this first)
+========================================================================
+This comment is for an AI assistant (e.g. Claude) asked to modify this
+file in a future session. It is invisible in the rendered app — only
+visible in the raw source — so read it before making any changes, and
+UPDATE it whenever you add or change a feature, so it stays accurate.
+
+COMPANY / LETTERHEAD
+- Oak Joinery (Pty) Ltd, 16 Bowling Avenue, Kramerville, Johannesburg
+- Reg No: 2022/532088/07  ·  VAT No: 4390291278
+- Shown on every dispatch note docket (see docketHtml inside viewNote()).
+
+DEPLOYMENT
+- Deployed as index.html on Netlify: https://chic-torrone-64d20f.netlify.app
+- Also works as a Claude artifact directly (see storage abstraction
+  below). To ship a change: edit this file, user drags the updated
+  index.html onto their existing Netlify project to redeploy.
+
+GOOGLE DRIVE SYNC
+- OAuth Client ID (public, safe to reuse):
+  137392962022-ru70duraegsu9r0v9oacglonndlg6b5q.apps.googleusercontent.com
+- Scope requested: https://www.googleapis.com/auth/drive (broad — lets a
+  second account, e.g. a driver, be granted access to just the shared
+  file via normal Drive sharing, not only files the app itself created).
+- Board data (items, notes, itemTypes, nextNo) syncs to one Drive file:
+  oakjoinery-stock-board.json
+- Each LOCKED dispatch note also saves as its own PDF into a Drive
+  folder: "Oak Joinery Dispatch Notes" (kept private — never shared with
+  the driver; only the JSON data file is shared with the driver, Editor
+  access).
+- Google Cloud project is in "Testing" publish status — every Google
+  account that signs in (owner + driver) must be added under Google
+  Auth Platform > Audience > Test users first, or sign-in fails with
+  "Access blocked". Real Console step, not fixable in code.
+
+CORE DATA MODEL (persisted as one JSON blob under storage key "board")
+- state.items[]: { id, type, qty, ref, status: 'unvinaged'|'vinaged'|
+  'dispatched', addedDate, vinagedDate, dispatchedDate, noteId }.
+  Statuses map to board columns: Unfinished / Finished / Dispatched.
+- state.notes[]: { id, number ('DN-0001'...), date, customer,
+  items: [{stockItemId, type, qty, ref}], driverSignature (dataURL|
+  null), driverSignedDate, driverName, vehicleReg, siteSignature
+  (dataURL|null), siteSignedDate, siteSignedBy, driveFileId }. Legacy
+  notes may only have a flat
+  `signature` field instead of driver/site — isNoteComplete() and the
+  docket renderer both fall back to it; keep that handling.
+- itemTypes[]: editable catalog for the type dropdowns, seeded from
+  DEFAULT_ITEM_TYPES. User manages it via "Manage items" — always
+  render dropdowns from itemTypes, never hardcode options again.
+- nextNo: counter for the next DN-XXXX number.
+- drive: { clientId, fileId } — persisted so reconnecting doesn't need
+  re-entry.
+
+KEY BUSINESS RULES (do not regress these without the user asking)
+1. isNoteComplete() = true iff the note has a SITE signature. Driver
+   signature does NOT lock it. Deliberate: driver can sign & save,
+   note stays fully editable until the site signature lands — that is
+   the one action that locks it.
+2. A pending (unlocked) note lets you: add items from Finished stock or
+   ad-hoc, remove items (min 1 must remain), edit customer name,
+   capture/redo driver signature independently ("Save driver
+   signature", no site signature needed at the same time), and capture
+   the site signature independently ("Submit site signature & lock").
+3. A locked note cannot have items, customer, or signatures changed via
+   the normal Edit screen — that button disappears once locked. The
+   ONE exception is "Edit signing details" (openSigningDetails /
+   saveSigningDetails) — always available, locked or not, old or new —
+   which only touches: driver name, vehicle registration, site signer
+   name, driver signed date, site signed date. Never items, customer,
+   or the signature images. Exists so old notes can be backfilled
+   without reopening the whole note.
+4. Adding stock (Unfinished, Finished, dispatch cart lines, or ad-hoc
+   additions to a pending note) merges into an existing card with the
+   same type + reference instead of duplicating — see
+   findMergeTarget(). "Combine duplicates" does a one-time bulk merge
+   of Unfinished/Finished only (not Dispatched — those are tied 1:1 to
+   specific note line items).
+5. Removing a stock item (× on a card) prompts for a quantity rather
+   than always deleting the whole card — see removeItem(). Finished
+   removals are meant for damaged/written-off stock.
+6. Dispatch notes support MULTIPLE items per note via a cart
+   (dispatchCart — see addToDispatchCart / renderCartPanel). Finished
+   cards say "Add to dispatch note" to stage them; the Dispatched
+   column's quick-add form stages ad-hoc lines the same way. "Review &
+   sign" opens the driver-signature step for the whole cart at once.
+7. A new note can be created with NO signature via "Save for now"
+   (submitDispatch(false)) — items still move to Dispatched, note just
+   isn't signed yet.
+
+SIGNATURE CAPTURE
+- Multiple independent pads can exist on screen at once (needed for the
+  Edit screen: driver + site pads together). Handled via `sigPads`, a
+  map keyed by canvas id — NOT a single global pad. Always pass an
+  explicit canvasId to setupSignaturePad/clearSignature/
+  getSignatureDataUrl; don't reintroduce a single-pad global.
+
+SHARING
+- Print / Email / WhatsApp / "Save to Drive" all render the SAME
+  #printArea docket template (docketHtml inside viewNote()) via
+  html2canvas + jsPDF — any docket layout change automatically applies
+  everywhere. Never build a second copy of the docket markup.
+- Email/WhatsApp try navigator.share() (native file-share sheet, shows
+  the actual docket image, signatures included) first, falling back to
+  plain-text mailto:/wa.me links where that's unavailable (typical on
+  desktop).
+
+MOBILE / DEPLOYMENT NOTES
+- Viewport meta tag is required for the responsive CSS to work when
+  hosted standalone outside the Claude artifact iframe — don't remove.
+- `storage` abstracts window.storage (Claude artifact) vs localStorage
+  (standalone hosting) — see hasClaudeStorage / localStore near the top
+  of the script. Never call window.storage directly elsewhere.
+
+ITEM CATALOG DEFAULTS (see DEFAULT_ITEM_TYPES — just the seed list;
+the live list is itemTypes[], user-editable, don't assume it's unchanged)
+Bedside Pedestal 500mm/600mm, Head Board Left/Right Handed, Cushioned
+Fabric Headboard Panel, TV Panel Left/Right Handed (mirror panel only —
+aluminium tracked separately), Aluminium Flat Bar 2206x38/2813x38/
+2813x19, Wet Bar Left/Right Handed (doors+handles only — hanging rail
+tracked separately), Hanging Rail 1011mm, Mirrors, Glass Shelves.
+
+WHEN THE USER UPLOADS THIS FILE AGAIN
+- Read this whole block first, before doing anything else.
+- Check itemTypes[]/state in any accompanying data to understand real
+  current state — don't assume the defaults above are still accurate.
+- Make the smallest change that satisfies the new request while
+  preserving everything above.
+- Re-verify onclick handlers / element ids / JS syntax before calling a
+  change complete — a naive string edit in a file this size easily
+  leaves a dangling reference. (Quick check: node --check on the JS
+  extracted from the main script block, plus grep onclick targets
+  against defined functions.)
+- Keep any duplicate deployment copy (e.g. stock-board.html) byte-
+  identical to index.html after every change.
+- Update this comment block itself if you add/remove/change a feature.
+========================================================================
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Stock Board</title>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#1E1C18; --panel:#26221C; --panel-2:#2E2A22; --line:#433D32;
+    --text:#EFE8D8; --muted:#9C9280; --faint:#6E6656;
+    --amber:#E3A23A; --amber-dim:#3B2E1A;
+    --green:#5FA776; --green-dim:#1E2B22;
+    --rust:#C1613D; --rust-dim:#33221B;
+    --font-d:'Barlow Condensed',sans-serif;
+    --font-b:'Inter',sans-serif;
+    --font-m:'IBM Plex Mono',monospace;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+  html{-webkit-text-size-adjust:100%;text-size-adjust:100%;}
+  body{background:var(--bg);color:var(--text);font-family:var(--font-b);margin:0;padding:28px 24px 60px;padding-bottom:calc(60px + env(safe-area-inset-bottom));}
+  h1{font-family:var(--font-d);font-weight:700;font-size:34px;letter-spacing:.02em;margin:0;text-transform:uppercase;}
+  .sub{font-family:var(--font-m);color:var(--faint);font-size:12px;letter-spacing:.08em;text-transform:uppercase;margin-top:4px;}
+  .topline{display:flex;justify-content:space-between;align-items:flex-end;border-bottom:2px solid var(--line);padding-bottom:16px;margin-bottom:22px;flex-wrap:wrap;gap:12px;}
+  button{font-family:var(--font-b);cursor:pointer;}
+  .btn{background:transparent;border:1px solid var(--line);color:var(--text);padding:8px 14px;border-radius:3px;font-size:13px;font-weight:500;transition:.15s;}
+  .btn:hover{border-color:var(--amber);color:var(--amber);}
+  .btn-primary{background:var(--amber);border-color:var(--amber);color:#241a08;font-weight:600;}
+  .btn-primary:hover{background:#eeb055;color:#241a08;}
+  .btn-green{background:var(--green);border-color:var(--green);color:#0f1c14;font-weight:600;}
+  .btn-green:hover{background:#72bd88;}
+  .btn-rust{background:transparent;border:1px solid var(--rust);color:var(--rust);}
+  .btn-rust:hover{background:var(--rust);color:#2a160e;}
+  .btn-sm{padding:5px 10px;font-size:12px;}
+
+  .addbar{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:16px;margin-bottom:26px;display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;}
+  .field{display:flex;flex-direction:column;gap:5px;}
+  .field label{font-family:var(--font-m);font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;}
+  select,input[type=text],input[type=number]{background:var(--panel-2);border:1px solid var(--line);color:var(--text);padding:8px 10px;border-radius:3px;font-family:var(--font-b);font-size:13px;min-width:140px;}
+  select:focus,input:focus{outline:none;border-color:var(--amber);}
+  input[type=number]{min-width:70px;}
+
+  .board{display:grid;grid-template-columns:1fr 1fr 1fr;gap:18px;align-items:start;}
+  @media(max-width:900px){.board{grid-template-columns:1fr;}}
+  @media(max-width:640px){
+    body{padding:18px 14px 60px;padding-bottom:calc(60px + env(safe-area-inset-bottom));}
+    h1{font-size:28px;}
+    .topline{flex-direction:column;align-items:flex-start;}
+    .topline > div:last-child{width:100%;display:flex;gap:8px;}
+    .topline > div:last-child .btn{flex:1;}
+    .addbar{flex-direction:column;align-items:stretch;}
+    .addbar .field{width:100%;}
+    select,input[type=text],input[type=number]{width:100%;font-size:16px;padding:10px;}
+    .btn{padding:10px 14px;font-size:14px;}
+    .modal{max-width:100%;}
+  }
+  .col{background:var(--panel);border:1px solid var(--line);border-radius:6px;min-height:120px;}
+  .col-head{display:flex;justify-content:space-between;align-items:center;padding:12px 14px;border-bottom:1px solid var(--line);}
+  .col-head h2{font-family:var(--font-d);font-size:19px;font-weight:600;letter-spacing:.03em;text-transform:uppercase;margin:0;}
+  .count{font-family:var(--font-m);font-size:12px;background:var(--panel-2);border:1px solid var(--line);border-radius:10px;padding:1px 9px;color:var(--muted);}
+  .col.unvinaged .col-head{border-top:3px solid var(--faint);}
+  .col.vinaged .col-head{border-top:3px solid var(--amber);}
+  .col.dispatched .col-head{border-top:3px solid var(--green);}
+  .col-body{padding:10px;display:flex;flex-direction:column;gap:10px;}
+  .col-add{background:var(--panel-2);border:1px dashed var(--line);border-radius:4px;padding:10px;margin:10px 10px 0;display:flex;flex-direction:column;gap:8px;}
+  .col-add .field{width:100%;}
+  .col-add select,.col-add input{width:100%;min-width:0;}
+  .col-add .btn{width:100%;text-align:center;}
+  .empty{color:var(--faint);font-size:12px;font-family:var(--font-m);padding:16px 6px;text-align:center;}
+
+  .card{background:var(--panel-2);border:1px solid var(--line);border-left:3px solid var(--faint);border-radius:4px;padding:11px 12px;}
+  .col.vinaged .card{border-left-color:var(--amber);}
+  .col.dispatched .card{border-left-color:var(--green);opacity:.9;}
+  .card-top{display:flex;justify-content:space-between;align-items:flex-start;gap:8px;}
+  .card-type{font-family:var(--font-d);font-size:18px;font-weight:600;line-height:1.1;}
+  .card-qty{font-family:var(--font-m);font-size:12px;color:var(--muted);white-space:nowrap;}
+  .card-ref{font-size:12px;color:var(--muted);margin-top:2px;}
+  .spec{margin:8px 0 0;padding:8px 9px;background:var(--bg);border:1px dashed var(--line);border-radius:3px;font-size:11.5px;color:var(--muted);line-height:1.55;}
+  .spec div{display:flex;gap:6px;}
+  .spec .tag{color:var(--faint);min-width:14px;}
+  .card-dates{font-family:var(--font-m);font-size:10.5px;color:var(--faint);margin-top:8px;display:flex;gap:10px;flex-wrap:wrap;}
+  .card-actions{margin-top:10px;display:flex;gap:8px;}
+  .del{background:none;border:none;color:var(--faint);font-size:16px;line-height:1;padding:0 2px;}
+  .del:hover{color:var(--rust);}
+
+  .modal-wrap{position:relative;}
+  .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:50;padding:20px;}
+  .modal{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:22px;width:100%;max-width:420px;max-height:90vh;overflow:auto;}
+  .modal h3{font-family:var(--font-d);font-size:22px;text-transform:uppercase;margin:0 0 4px;}
+  .modal .hint{font-size:12px;color:var(--muted);margin-bottom:16px;}
+  .modal-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:18px;flex-wrap:wrap;}
+
+  .docket{background:#F3EEDF;color:#2A2519;border:1px solid #B9AF93;border-radius:4px;padding:22px 24px;position:relative;font-family:var(--font-b);}
+  .docket:before{content:"";position:absolute;top:0;left:22px;right:22px;border-top:2px dashed #B9AF93;}
+  .docket-head{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #2A2519;padding-bottom:10px;margin-bottom:14px;}
+  .docket-head h3{font-family:var(--font-d);font-size:26px;text-transform:uppercase;margin:0;letter-spacing:.02em;}
+  .docket-letterhead{margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid #B9AF93;}
+  .docket-letterhead .lh-name{font-family:var(--font-d);font-size:19px;font-weight:700;text-transform:uppercase;letter-spacing:.03em;color:#2A2519;}
+  .docket-letterhead .lh-addr{font-size:11.5px;color:#5A5238;margin-top:3px;}
+  .docket-letterhead .lh-reg{font-family:var(--font-m);font-size:10px;color:#8a8060;margin-top:5px;letter-spacing:.02em;}
+  .docket-num{font-family:var(--font-m);font-size:12px;color:#5A5238;}
+  .docket-date{font-family:var(--font-m);font-size:13px;border:1px solid #2A2519;border-radius:3px;padding:4px 9px;transform:rotate(-2deg);display:inline-block;}
+  .docket{overflow:hidden;width:100%;}
+  .docket-row{display:flex;justify-content:space-between;gap:10px;font-size:12px;color:#5A5238;margin-bottom:2px;}
+  .docket-row span:first-child{flex-shrink:0;}
+  .docket-row span:last-child{text-align:right;overflow-wrap:anywhere;}
+  .docket-items{margin-top:14px;border-top:1px solid #B9AF93;padding-top:10px;}
+  .docket-item{display:flex;justify-content:space-between;gap:10px;font-size:13px;padding:5px 0;border-bottom:1px dotted #B9AF93;}
+  .docket-item span:first-child{flex:1;min-width:0;overflow-wrap:anywhere;}
+  .docket-item span:last-child{flex-shrink:0;white-space:nowrap;}
+  .docket-item .spec{background:transparent;border:none;color:#5A5238;padding:2px 0 0;margin:0;}
+  .docket-sig{margin-top:16px;padding-top:12px;border-top:1px solid #B9AF93;}
+  .docket-sig img{display:block;max-width:220px;height:auto;}
+  .docket-sig .sig-label{font-family:var(--font-m);font-size:10px;color:#5A5238;text-transform:uppercase;letter-spacing:.06em;margin-top:4px;}
+
+  .sigwrap{background:#F3EEDF;border:1px solid var(--line);border-radius:4px;overflow:hidden;touch-action:none;}
+  .sigwrap canvas{display:block;width:100%;height:120px;touch-action:none;}
+  .sig-actions{display:flex;justify-content:space-between;align-items:center;margin-top:6px;}
+  .sig-hint{font-family:var(--font-m);font-size:10.5px;color:var(--faint);}
+
+  .drive-btn{display:flex;align-items:center;gap:7px;}
+
+  .cart-panel{background:var(--amber-dim);border:1px solid var(--amber);border-radius:4px;margin:10px 10px 0;padding:10px;}
+  .cart-title{font-family:var(--font-m);font-size:11px;color:var(--amber);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px;}
+  .cart-line{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:12.5px;padding:4px 0;border-bottom:1px dashed rgba(227,162,58,.3);}
+  .cart-line:last-of-type{border-bottom:none;}
+  .cart-line .rm{background:none;border:none;color:var(--faint);font-size:15px;line-height:1;cursor:pointer;padding:0 2px;}
+  .cart-line .rm:hover{color:var(--rust);}
+  .cart-panel .btn{width:100%;margin-top:8px;}
+
+  .note-item-row{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-bottom:1px dotted #B9AF93;}
+  .note-item-row .rm{background:none;border:none;color:#8a8060;font-size:16px;line-height:1;cursor:pointer;padding:0 2px;}
+  .note-item-row .rm:hover{color:var(--rust);}
+  .add-item-row{display:flex;flex-direction:column;gap:6px;margin-top:10px;}
+  .drive-dot{width:8px;height:8px;border-radius:50%;background:var(--faint);flex-shrink:0;}
+  .drive-dot.on{background:var(--green);}
+  .drive-dot.syncing{background:var(--amber);}
+  .drive-dot.err{background:var(--rust);}
+
+  @media print{
+    body *{visibility:hidden;}
+    #printArea, #printArea *{visibility:visible;}
+    #printArea{position:absolute;top:0;left:0;width:100%;}
+    .modal-actions{display:none;}
+  }
+</style>
+</head>
+<body>
+
+<div class="topline">
+  <div>
+    <h1>Stock board</h1>
+    <div class="sub" id="dateline">—</div>
+  </div>
+  <div style="display:flex;gap:8px;">
+    <button class="btn drive-btn" id="driveBtn"><span class="drive-dot" id="driveDot"></span><span id="driveLabel">Google Drive</span></button>
+    <button class="btn" id="manageTypesBtn">Manage items</button>
+    <button class="btn" id="exportBtn">Download today's sheet</button>
+    <button class="btn" id="combineBtn">Combine duplicates</button>
+    <button class="btn" id="notesBtn">Dispatch notes (<span id="notesCount">0</span>)</button>
+  </div>
+</div>
+
+<div class="addbar">
+  <div class="field">
+    <label>Item</label>
+    <select id="typeSelect"></select>
+  </div>
+  <div class="field">
+    <label>Qty</label>
+    <input type="number" id="qtyInput" value="1" min="1">
+  </div>
+  <div class="field" style="flex:1;">
+    <label>Reference / job</label>
+    <input type="text" id="refInput" value="NH Hotel">
+  </div>
+  <button class="btn btn-primary" id="addBtn">+ Add to unfinished</button>
+</div>
+
+<div class="board">
+  <div class="col unvinaged">
+    <div class="col-head"><h2>Unfinished</h2><span class="count" id="cnt-unvinaged">0</span></div>
+    <div class="col-body" id="col-unvinaged"></div>
+  </div>
+  <div class="col vinaged">
+    <div class="col-head"><h2>Finished</h2><span class="count" id="cnt-vinaged">0</span></div>
+    <div class="col-add">
+      <select id="typeSelectFin"></select>
+      <input type="number" id="qtyInputFin" value="1" min="1">
+      <input type="text" id="refInputFin" value="NH Hotel">
+      <button class="btn btn-green" id="addBtnFin">+ Add to finished</button>
+    </div>
+    <div class="col-body" id="col-vinaged"></div>
+  </div>
+  <div class="col dispatched">
+    <div class="col-head"><h2>Dispatched</h2><span class="count" id="cnt-dispatched">0</span></div>
+    <div id="cartPanel"></div>
+    <div class="col-add">
+      <select id="typeSelectDis"></select>
+      <input type="number" id="qtyInputDis" value="1" min="1">
+      <input type="text" id="refInputDis" value="NH Hotel">
+      <button class="btn btn-primary" id="addBtnDis">+ Add item to dispatch note</button>
+    </div>
+    <div class="col-body" id="col-dispatched"></div>
+  </div>
+</div>
+
+<div id="modalLayer"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script>
+const SPECS = {
+  "Bedside Pedestal 500mm": null,
+  "Bedside Pedestal 600mm": null,
+  "Head Board Left Handed": null,
+  "Head Board Right Handed": null,
+  "Cushioned Fabric Headboard Panel": null,
+  "TV Panel Left Handed": [
+    "Mirror panel fitted"
+  ],
+  "TV Panel Right Handed": [
+    "Mirror panel fitted"
+  ],
+  "Aluminium Flat Bar 2206x38": null,
+  "Aluminium Flat Bar 2813x38": null,
+  "Aluminium Flat Bar 2813x19": null,
+  "Wet Bar Left Handed": [
+    "Doors fitted",
+    "Handles fitted"
+  ],
+  "Wet Bar Right Handed": [
+    "Doors fitted",
+    "Handles fitted"
+  ],
+  "Hanging Rail 1011mm": null,
+  "Mirrors": null,
+  "Glass Shelves": null
+};
+
+const DEFAULT_ITEM_TYPES = [
+  "Bedside Pedestal 500mm",
+  "Bedside Pedestal 600mm",
+  "Head Board Left Handed",
+  "Head Board Right Handed",
+  "Cushioned Fabric Headboard Panel",
+  "TV Panel Left Handed",
+  "TV Panel Right Handed",
+  "Aluminium Flat Bar 2206x38",
+  "Aluminium Flat Bar 2813x38",
+  "Aluminium Flat Bar 2813x19",
+  "Wet Bar Left Handed",
+  "Wet Bar Right Handed",
+  "Hanging Rail 1011mm",
+  "Mirrors",
+  "Glass Shelves"
+];
+
+let state = { items: [], notes: [] };
+let itemTypes = DEFAULT_ITEM_TYPES.slice();
+let nextNo = 1;
+let drive = { clientId: '', fileId: '', status: 'disconnected' }; // status: disconnected|connected|syncing|error
+let driveAccessToken = null;
+let tokenClient = null;
+let driveSyncTimer = null;
+
+function todayStr(){
+  const d = new Date();
+  return d.toLocaleDateString('en-GB', {day:'2-digit', month:'short', year:'numeric'});
+}
+document.getElementById('dateline').textContent = todayStr();
+
+function isoDate(){
+  const d = new Date();
+  return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+}
+
+function exportDaySheet(auto){
+  const today = todayStr();
+  const todaysNotes = state.notes.filter(n => n.date === today);
+  if(todaysNotes.length === 0){
+    if(!auto) alert('No dispatches logged today yet.');
+    return;
+  }
+  const rows = [['Dispatch note','Date','Customer','Item','Reference','Qty','Signed']];
+  todaysNotes.forEach(n => {
+    n.items.forEach(it => {
+      rows.push([n.number, n.date, n.customer, it.type, it.ref || '', it.qty, isNoteComplete(n) ? 'Yes' : 'No']);
+    });
+  });
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  ws['!cols'] = [{wch:12},{wch:12},{wch:22},{wch:20},{wch:18},{wch:6},{wch:8}];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, isoDate());
+  XLSX.writeFile(wb, 'Dispatch-' + isoDate() + '.xlsx');
+}
+
+document.getElementById('exportBtn').addEventListener('click', () => exportDaySheet(false));
+
+function uid(){ return 'i' + Date.now().toString(36) + Math.random().toString(36).slice(2,7); }
+
+const hasClaudeStorage = typeof window.storage !== 'undefined';
+const localStore = {
+  async get(key){
+    const v = window.localStorage.getItem(key);
+    return v === null ? null : { key, value: v };
+  },
+  async set(key, value){
+    window.localStorage.setItem(key, value);
+    return { key, value };
+  }
+};
+const storage = hasClaudeStorage ? window.storage : localStore;
+
+async function load(){
+  try{
+    const res = await storage.get('board', false);
+    if(res && res.value){
+      const parsed = JSON.parse(res.value);
+      state.items = parsed.items || [];
+      state.notes = parsed.notes || [];
+      nextNo = parsed.nextNo || (state.notes.length + 1);
+      itemTypes = (parsed.itemTypes && parsed.itemTypes.length) ? parsed.itemTypes : DEFAULT_ITEM_TYPES.slice();
+      if(parsed.drive){
+        drive.clientId = parsed.drive.clientId || '';
+        drive.fileId = parsed.drive.fileId || '';
+      }
+    }
+  }catch(e){ }
+  renderTypeSelects();
+  render();
+  updateDriveUi();
+  if(drive.clientId) tryAutoReconnectDrive();
+}
+
+async function save(){
+  try{
+    await storage.set('board', JSON.stringify({items: state.items, notes: state.notes, nextNo, itemTypes, drive: {clientId: drive.clientId, fileId: drive.fileId}}), false);
+  }catch(e){ console.error('storage failed', e); }
+  queueDriveSync();
+}
+
+function renderTypeSelects(){
+  const optionsHtml = itemTypes.map(t => `<option value="${t.replace(/"/g,'&quot;')}">${t}</option>`).join('');
+  ['typeSelect', 'typeSelectFin', 'typeSelectDis'].forEach(id => {
+    const el = document.getElementById(id);
+    if(!el) return;
+    const prev = el.value;
+    el.innerHTML = optionsHtml;
+    if(itemTypes.includes(prev)) el.value = prev;
+  });
+}
+
+document.getElementById('manageTypesBtn').addEventListener('click', openManageTypes);
+
+function openManageTypes(){
+  const layer = document.getElementById('modalLayer');
+  layer.innerHTML = `<div class="modal-bg" id="typesBg">
+    <div class="modal" style="max-width:420px;">
+      <h3>Manage items</h3>
+      <div class="hint">Add or remove item types from the dropdowns. Removing one doesn't affect stock already on the board.</div>
+      <div style="max-height:280px;overflow:auto;display:flex;flex-direction:column;gap:4px;margin-bottom:14px;">
+        ${itemTypes.map(t => `<div class="note-item-row" style="border-bottom:1px solid var(--line);"><span>${t}</span><button class="rm" onclick="removeItemType('${t.replace(/'/g,"\\'")}')" title="Remove">&times;</button></div>`).join('')}
+      </div>
+      <div class="field">
+        <label>New item name</label>
+        <input type="text" id="newTypeInput" placeholder="e.g. Corner Unit — left handed" style="width:100%;">
+      </div>
+      <div id="typeErr" style="color:var(--rust);font-size:12px;margin-top:8px;display:none;"></div>
+      <div class="modal-actions">
+        <button class="btn" onclick="closeModal()">Done</button>
+        <button class="btn btn-primary" onclick="addItemType()">Add item</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function addItemType(){
+  const input = document.getElementById('newTypeInput');
+  const name = input.value.trim();
+  const err = document.getElementById('typeErr');
+  if(!name){
+    err.textContent = 'Enter a name for the item';
+    err.style.display = 'block';
+    return;
+  }
+  if(itemTypes.includes(name)){
+    err.textContent = 'That item already exists';
+    err.style.display = 'block';
+    return;
+  }
+  itemTypes.push(name);
+  save();
+  renderTypeSelects();
+  openManageTypes();
+}
+
+function removeItemType(name){
+  itemTypes = itemTypes.filter(t => t !== name);
+  save();
+  renderTypeSelects();
+  openManageTypes();
+}
+
+function specHtml(type){
+  const s = SPECS[type];
+  if(!s) return '';
+  return '<div class="spec">' + s.map(l => '<div><span class="tag">-</span><span>'+l+'</span></div>').join('') + '</div>';
+}
+
+function render(){
+  const cols = {unvinaged:[], vinaged:[], dispatched:[]};
+  state.items.forEach(it => cols[it.status].push(it));
+
+  document.getElementById('cnt-unvinaged').textContent = cols.unvinaged.length;
+  document.getElementById('cnt-vinaged').textContent = cols.vinaged.length;
+  document.getElementById('cnt-dispatched').textContent = cols.dispatched.length;
+  document.getElementById('notesCount').textContent = state.notes.length;
+
+  renderCol('unvinaged', cols.unvinaged);
+  renderCol('vinaged', cols.vinaged);
+  renderCol('dispatched', cols.dispatched);
+  renderCartPanel();
+}
+
+function renderCartPanel(){
+  const el = document.getElementById('cartPanel');
+  if(!el) return;
+  if(dispatchCart.length === 0){
+    el.innerHTML = '';
+    return;
+  }
+  el.innerHTML = `<div class="cart-panel">
+    <div class="cart-title">Dispatch note in progress — ${dispatchCart.length} item${dispatchCart.length > 1 ? 's' : ''}</div>
+    ${dispatchCart.map(c => `<div class="cart-line"><span>${c.type}${c.ref ? ' — ' + c.ref : ''} x${c.qty}</span><button class="rm" onclick="removeFromCart('${c.tempId}')" title="Remove">&times;</button></div>`).join('')}
+    <button class="btn btn-primary btn-sm" onclick="startDispatchFromCart()">Review &amp; sign (${dispatchCart.length})</button>
+  </div>`;
+}
+
+function renderCol(status, list){
+  const el = document.getElementById('col-'+status);
+  if(list.length === 0){
+    el.innerHTML = '<div class="empty">No stock here</div>';
+    return;
+  }
+  el.innerHTML = list.slice().reverse().map(it => cardHtml(it, status)).join('');
+}
+
+function isNoteComplete(note){
+  return !!(note.siteSignature || note.signature);
+}
+
+function cardHtml(it, status){
+  let actions = '';
+  let dates = `<span>Added ${it.addedDate}</span>`;
+  if(status === 'unvinaged'){
+    actions = `<button class="btn btn-green btn-sm" onclick="markVinaged('${it.id}')">Mark finished</button>`;
+  } else if(status === 'vinaged'){
+    dates += `<span>Finished ${it.vinagedDate}</span>`;
+    const inCart = dispatchCart.some(c => c.stockItemId === it.id);
+    actions = inCart
+      ? `<button class="btn btn-sm" disabled style="opacity:.5;">In dispatch note</button>`
+      : `<button class="btn btn-primary btn-sm" onclick="addToDispatchCart('${it.id}')">Add to dispatch note</button>`;
+  } else {
+    dates += `<span>Finished ${it.vinagedDate}</span><span>Dispatched ${it.dispatchedDate}</span>`;
+    const note = state.notes.find(n => n.id === it.noteId);
+    const complete = note ? isNoteComplete(note) : true;
+    actions = complete
+      ? `<button class="btn btn-sm" onclick="viewNote('${it.noteId}')">View dispatch note</button>`
+      : `<button class="btn btn-primary btn-sm" onclick="viewNote('${it.noteId}')">Complete signature</button>`;
+  }
+  return `<div class="card">
+    <div class="card-top">
+      <div>
+        <div class="card-type">${it.type}</div>
+        ${it.ref ? `<div class="card-ref">${it.ref}</div>` : ''}
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <span class="card-qty">x${it.qty}</span>
+        ${(status==='unvinaged' || (status==='vinaged' && !dispatchCart.some(c => c.stockItemId === it.id))) ? `<button class="del" title="Remove" onclick="removeItem('${it.id}')">&times;</button>` : ''}
+      </div>
+    </div>
+    ${specHtml(it.type)}
+    <div class="card-dates">${dates}</div>
+    <div class="card-actions">${actions}</div>
+  </div>`;
+}
+
+function findMergeTarget(status, type, ref){
+  return state.items.find(x => x.status === status && x.type === type && (x.ref || '') === (ref || ''));
+}
+
+function combineDuplicates(){
+  let mergedCount = 0;
+  ['unvinaged', 'vinaged'].forEach(status => {
+    const groups = {};
+    state.items.filter(it => it.status === status).forEach(it => {
+      const key = it.type + '|' + (it.ref || '');
+      (groups[key] = groups[key] || []).push(it);
+    });
+    Object.values(groups).forEach(group => {
+      if(group.length <= 1) return;
+      const keeper = group[0];
+      for(let i = 1; i < group.length; i++){
+        keeper.qty += group[i].qty;
+        state.items = state.items.filter(x => x.id !== group[i].id);
+        mergedCount++;
+      }
+    });
+  });
+  save();
+  render();
+  alert(mergedCount > 0 ? `Combined ${mergedCount} duplicate card${mergedCount > 1 ? 's' : ''} into existing ones.` : 'No duplicates found — everything is already combined.');
+}
+document.getElementById('combineBtn').addEventListener('click', combineDuplicates);
+
+document.getElementById('addBtn').addEventListener('click', () => {
+  const type = document.getElementById('typeSelect').value;
+  const qty = Math.max(1, parseInt(document.getElementById('qtyInput').value) || 1);
+  const ref = document.getElementById('refInput').value.trim();
+  const existing = findMergeTarget('unvinaged', type, ref);
+  if(existing){
+    existing.qty += qty;
+  } else {
+    state.items.push({
+      id: uid(), type, qty, ref,
+      status: 'unvinaged',
+      addedDate: todayStr(),
+      vinagedDate: null,
+      dispatchedDate: null,
+      noteId: null
+    });
+  }
+  document.getElementById('refInput').value = 'NH Hotel';
+  document.getElementById('qtyInput').value = 1;
+  save(); render();
+});
+
+function consumeFromStatus(status, type, qty){
+  let remaining = qty;
+  const rest = [];
+  state.items.forEach(it => {
+    if(remaining > 0 && it.status === status && it.type === type){
+      if(it.qty <= remaining){
+        remaining -= it.qty;
+      } else {
+        it.qty -= remaining;
+        remaining = 0;
+        rest.push(it);
+      }
+    } else {
+      rest.push(it);
+    }
+  });
+  state.items = rest;
+}
+
+document.getElementById('addBtnFin').addEventListener('click', () => {
+  const type = document.getElementById('typeSelectFin').value;
+  const qty = Math.max(1, parseInt(document.getElementById('qtyInputFin').value) || 1);
+  const ref = document.getElementById('refInputFin').value.trim();
+  const today = todayStr();
+  consumeFromStatus('unvinaged', type, qty);
+  const existing = findMergeTarget('vinaged', type, ref);
+  if(existing){
+    existing.qty += qty;
+  } else {
+    state.items.push({
+      id: uid(), type, qty, ref,
+      status: 'vinaged',
+      addedDate: today,
+      vinagedDate: today,
+      dispatchedDate: null,
+      noteId: null
+    });
+  }
+  document.getElementById('refInputFin').value = 'NH Hotel';
+  document.getElementById('qtyInputFin').value = 1;
+  save(); render();
+});
+
+document.getElementById('addBtnDis').addEventListener('click', () => {
+  const type = document.getElementById('typeSelectDis').value;
+  const qty = Math.max(1, parseInt(document.getElementById('qtyInputDis').value) || 1);
+  const ref = document.getElementById('refInputDis').value.trim();
+  const existing = dispatchCart.find(c => c.stockItemId === null && c.type === type && (c.ref || '') === (ref || ''));
+  if(existing){
+    existing.qty += qty;
+  } else {
+    dispatchCart.push({ tempId: uid(), stockItemId: null, type, qty, ref });
+  }
+  document.getElementById('refInputDis').value = 'NH Hotel';
+  document.getElementById('qtyInputDis').value = 1;
+  render();
+});
+
+function addToDispatchCart(stockItemId){
+  const it = state.items.find(x => x.id === stockItemId);
+  if(!it) return;
+  if(dispatchCart.some(c => c.stockItemId === stockItemId)) return;
+  dispatchCart.push({ tempId: uid(), stockItemId, type: it.type, qty: it.qty, ref: it.ref });
+  render();
+}
+
+function removeFromCart(tempId){
+  dispatchCart = dispatchCart.filter(c => c.tempId !== tempId);
+  render();
+}
+
+function markVinaged(id){
+  const it = state.items.find(x => x.id === id);
+  if(!it) return;
+  it.status = 'vinaged';
+  it.vinagedDate = todayStr();
+  save(); render();
+}
+
+function removeItem(id){
+  const it = state.items.find(x => x.id === id);
+  if(!it) return;
+  const label = `${it.type}${it.ref ? ' (' + it.ref + ')' : ''}`;
+  const isFinished = it.status === 'vinaged';
+  const promptMsg = it.qty > 1
+    ? `How many "${label}" do you want to remove? (${it.qty} in stock)${isFinished ? ' — use for damaged or written-off items' : ''}`
+    : `Remove "${label}"?${isFinished ? ' Use for damaged or written-off items.' : ''}`;
+  const input = prompt(promptMsg, String(it.qty));
+  if(input === null) return;
+  const n = parseInt(input);
+  if(!n || n <= 0){
+    alert('Enter a quantity greater than 0.');
+    return;
+  }
+  const removeQty = Math.min(n, it.qty);
+  if(removeQty >= it.qty){
+    state.items = state.items.filter(x => x.id !== id);
+  } else {
+    it.qty -= removeQty;
+  }
+  save(); render();
+}
+
+let dispatchCart = [];
+let sigPads = {}; // canvasId -> { ctx, hasContent, drawing, lastX, lastY }
+
+function startDispatchFromCart(){
+  if(dispatchCart.length === 0) return;
+  showDispatchModal();
+}
+
+function showDispatchModal(){
+  const layer = document.getElementById('modalLayer');
+  const itemsHtml = dispatchCart.map(c => `<div class="note-item-row"><span>${c.type}${c.ref ? ' — ' + c.ref : ''} x${c.qty}</span></div>`).join('');
+  layer.innerHTML = `<div class="modal-bg" id="dispBg">
+    <div class="modal">
+      <h3>Dispatch</h3>
+      <div class="hint">${dispatchCart.length} item${dispatchCart.length > 1 ? 's' : ''} on this note</div>
+      <div style="margin-bottom:10px;">${itemsHtml}</div>
+      <div class="field">
+        <label>Customer / destination</label>
+        <input type="text" id="custInput" placeholder="e.g. Acme Motorhomes" style="width:100%;">
+      </div>
+      <div class="field" style="margin-top:12px;">
+        <label>Driver name</label>
+        <input type="text" id="driverNameInput" placeholder="e.g. Thabo M." style="width:100%;">
+      </div>
+      <div class="field" style="margin-top:12px;">
+        <label>Vehicle registration</label>
+        <input type="text" id="vehicleRegInput" placeholder="e.g. CA 123-456" style="width:100%;">
+      </div>
+      <div class="field" style="margin-top:12px;">
+        <label>Driver signature</label>
+        <div class="sigwrap"><canvas id="sigCanvas"></canvas></div>
+        <div class="sig-actions">
+          <span class="sig-hint">Driver signs to confirm items loaded</span>
+          <button type="button" class="btn btn-sm" onclick="clearSignature('sigCanvas')">Clear</button>
+        </div>
+      </div>
+      <div id="dispErr" style="color:var(--rust);font-size:12px;margin-top:10px;display:none;">Enter a customer or destination first</div>
+      <div class="modal-actions">
+        <button class="btn" onclick="closeModal()">Cancel</button>
+        <button class="btn" onclick="submitDispatch(false)">Save for now</button>
+        <button class="btn btn-primary" onclick="submitDispatch(true)">Submit driver signature</button>
+      </div>
+    </div>
+  </div>`;
+  setupSignaturePad('sigCanvas');
+}
+
+function setupSignaturePad(canvasId){
+  canvasId = canvasId || 'sigCanvas';
+  const canvas = document.getElementById(canvasId);
+  if(!canvas) return;
+  const cssHeight = 120;
+  const rect = canvas.parentElement.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.max(1, rect.width) * dpr;
+  canvas.height = cssHeight * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.strokeStyle = '#2A2519';
+  ctx.lineWidth = 2.2;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  const pad = { ctx, hasContent: false, drawing: false, lastX: 0, lastY: 0 };
+  sigPads[canvasId] = pad;
+
+  function pos(e){
+    const r = canvas.getBoundingClientRect();
+    const t = e.touches && e.touches[0];
+    const cx = (t ? t.clientX : e.clientX) - r.left;
+    const cy = (t ? t.clientY : e.clientY) - r.top;
+    return { x: cx, y: cy };
+  }
+  function start(e){
+    e.preventDefault();
+    pad.drawing = true;
+    const p = pos(e);
+    pad.lastX = p.x; pad.lastY = p.y;
+  }
+  function move(e){
+    if(!pad.drawing) return;
+    e.preventDefault();
+    const p = pos(e);
+    ctx.beginPath();
+    ctx.moveTo(pad.lastX, pad.lastY);
+    ctx.lineTo(p.x, p.y);
+    ctx.stroke();
+    pad.lastX = p.x; pad.lastY = p.y;
+    pad.hasContent = true;
+  }
+  function end(){ pad.drawing = false; }
+
+  canvas.addEventListener('mousedown', start);
+  canvas.addEventListener('mousemove', move);
+  window.addEventListener('mouseup', end);
+  canvas.addEventListener('touchstart', start, { passive:false });
+  canvas.addEventListener('touchmove', move, { passive:false });
+  canvas.addEventListener('touchend', end);
+  canvas.addEventListener('touchcancel', end);
+}
+
+function clearSignature(canvasId){
+  canvasId = canvasId || 'sigCanvas';
+  const canvas = document.getElementById(canvasId);
+  const pad = sigPads[canvasId];
+  if(!canvas || !pad) return;
+  pad.ctx.clearRect(0, 0, canvas.width, canvas.height);
+  pad.hasContent = false;
+}
+
+function getSignatureDataUrl(canvasId){
+  canvasId = canvasId || 'sigCanvas';
+  const canvas = document.getElementById(canvasId);
+  const pad = sigPads[canvasId];
+  if(!canvas || !pad || !pad.hasContent) return null;
+  return canvas.toDataURL('image/png');
+}
+
+function closeModal(){
+  document.getElementById('modalLayer').innerHTML = '';
+  sigPads = {};
+}
+
+
+function submitDispatch(requireDriverSig){
+  const cust = document.getElementById('custInput').value.trim();
+  if(!cust){
+    document.getElementById('dispErr').style.display = 'block';
+    return;
+  }
+  const driverSignature = getSignatureDataUrl('sigCanvas');
+  if(requireDriverSig && !driverSignature){
+    const err = document.getElementById('dispErr');
+    err.textContent = 'Driver signature required';
+    err.style.display = 'block';
+    return;
+  }
+  const driverName = document.getElementById('driverNameInput').value.trim();
+  const vehicleReg = document.getElementById('vehicleRegInput').value.trim();
+  if(dispatchCart.length === 0) return;
+  const date = todayStr();
+  const noteId = uid();
+  const noteItems = [];
+
+  dispatchCart.forEach(c => {
+    let item;
+    if(c.stockItemId){
+      item = state.items.find(x => x.id === c.stockItemId);
+      if(!item) return;
+      item.status = 'dispatched';
+      item.dispatchedDate = date;
+      item.noteId = noteId;
+    } else {
+      consumeFromStatus('vinaged', c.type, c.qty);
+      item = {
+        id: uid(), type: c.type, qty: c.qty, ref: c.ref,
+        status: 'dispatched',
+        addedDate: date,
+        vinagedDate: date,
+        dispatchedDate: date,
+        noteId: noteId
+      };
+      state.items.push(item);
+    }
+    noteItems.push({ stockItemId: item.id, type: item.type, qty: item.qty, ref: item.ref });
+  });
+
+  const note = {
+    id: noteId,
+    number: 'DN-' + String(nextNo).padStart(4,'0'),
+    date,
+    customer: cust,
+    items: noteItems,
+    driverSignature: driverSignature || null,
+    driverSignedDate: driverSignature ? date : null,
+    driverName,
+    vehicleReg,
+    siteSignature: null,
+    siteSignedDate: null
+  };
+  nextNo += 1;
+  state.notes.push(note);
+  dispatchCart = [];
+
+  save();
+  closeModal();
+  render();
+  viewNote(noteId);
+}
+
+function viewNote(noteId){
+  const note = state.notes.find(n => n.id === noteId);
+  if(!note) return;
+  const complete = isNoteComplete(note);
+  const layer = document.getElementById('modalLayer');
+
+  const driverInfoLine = (note.driverName || note.vehicleReg)
+    ? `${note.driverName || ''}${note.driverName && note.vehicleReg ? ' · ' : ''}${note.vehicleReg ? 'Vehicle: ' + note.vehicleReg : ''}`
+    : '';
+  const driverBlock = note.driverSignature
+    ? `<div class="docket-sig"><img src="${note.driverSignature}" alt="Driver signature"><div class="sig-label">Dispatched &amp; signed by driver${driverInfoLine ? ' — ' + driverInfoLine : ''}${note.driverSignedDate ? ' — ' + note.driverSignedDate : ''}</div></div>`
+    : (note.signature ? `<div class="docket-sig"><img src="${note.signature}" alt="Signature"><div class="sig-label">Received &amp; signed by ${note.customer}${note.date ? ' — ' + note.date : ''}</div></div>` : '');
+  const siteBlock = note.siteSignature
+    ? `<div class="docket-sig"><img src="${note.siteSignature}" alt="Site signature"><div class="sig-label">Received &amp; signed by ${note.siteSignedBy || note.customer}${note.siteSignedDate ? ' — ' + note.siteSignedDate : ''}</div></div>`
+    : '';
+  const driverInfoRow = (driverInfoLine && !note.driverSignature)
+    ? `<div class="docket-row"><span>Driver</span><span>${driverInfoLine}</span></div>`
+    : '';
+
+  const itemLines = note.items.map(x => {
+    const removeBtn = (!complete && note.items.length > 1)
+      ? `<button class="rm" onclick="removeNoteItem('${note.id}','${x.stockItemId}')" title="Remove">&times;</button>`
+      : '';
+    return `<div class="${complete ? 'docket-item' : 'note-item-row'}"><span>${x.type}${x.ref ? ' — ' + x.ref : ''}</span><span style="display:flex;align-items:center;gap:6px;">x${x.qty}${removeBtn}</span></div>`;
+  }).join('');
+
+  const docketHtml = `<div class="docket" id="printArea">
+        <div class="docket-letterhead">
+          <div class="lh-name">Oak Joinery (Pty) Ltd</div>
+          <div class="lh-addr">16 Bowling Avenue, Kramerville, Johannesburg</div>
+          <div class="lh-reg">Reg No: 2022/532088/07 &middot; VAT No: 4390291278</div>
+        </div>
+        <div class="docket-head">
+          <div>
+            <h3>Dispatch note</h3>
+            <div class="docket-num">${note.number}</div>
+          </div>
+          <div class="docket-date">${note.date}</div>
+        </div>
+        <div class="docket-row"><span>To</span><span>${note.customer}</span></div>
+        ${driverInfoRow}
+        <div class="docket-items">
+          ${itemLines}
+        </div>
+        ${driverBlock}
+        ${siteBlock}
+      </div>`;
+
+  if(complete){
+    layer.innerHTML = `<div class="modal-bg" id="noteBg">
+      <div class="modal" style="max-width:480px;padding:0;background:transparent;border:none;">
+        ${docketHtml}
+        <div class="modal-actions">
+          <button class="btn" onclick="closeModal()">Close</button>
+          <button class="btn" onclick="openSigningDetails('${note.id}')">Edit signing details</button>
+          <button class="btn" onclick="window.print()">Print</button>
+          <button class="btn" onclick="shareEmail('${note.id}')">Email</button>
+          <button class="btn btn-green" onclick="shareWhatsApp('${note.id}')">WhatsApp</button>
+          <button class="btn" onclick="manualSaveRecord('${note.id}')">${note.driveFileId ? 'Re-save to Drive' : 'Save to Drive'}</button>
+        </div>
+      </div>
+    </div>`;
+    return;
+  }
+
+  const finishedOptions = state.items.filter(it => it.status === 'vinaged').map(it =>
+    `<option value="${it.id}">${it.type}${it.ref ? ' — ' + it.ref : ''} (x${it.qty})</option>`
+  ).join('');
+
+  layer.innerHTML = `<div class="modal-bg" id="noteBg">
+    <div class="modal" style="max-width:480px;">
+      ${docketHtml}
+
+      <div class="add-item-row">
+        <label class="sig-hint" style="margin-bottom:2px;">Add from Finished stock</label>
+        <select id="addFromFinished">
+          <option value="">— choose an item —</option>
+          ${finishedOptions}
+        </select>
+        <button type="button" class="btn btn-sm" onclick="addFinishedItemToNote('${note.id}')">Add selected item</button>
+      </div>
+
+      <div class="add-item-row">
+        <label class="sig-hint" style="margin-bottom:2px;">Or add an ad-hoc item</label>
+        <select id="addAdhocType">
+          ${itemTypes.map(t => `<option value="${t.replace(/"/g,'&quot;')}">${t}</option>`).join('')}
+        </select>
+        <input type="number" id="addAdhocQty" value="1" min="1">
+        <input type="text" id="addAdhocRef" value="${note.customer.replace(/"/g,'&quot;')}">
+        <button type="button" class="btn btn-sm" onclick="addAdhocItemToNote('${note.id}')">Add ad-hoc item</button>
+      </div>
+
+      ${!note.driverSignature ? `
+      <div class="field" style="margin-top:14px;">
+        <label>Driver name</label>
+        <input type="text" id="pendingDriverName" placeholder="e.g. Thabo M." style="width:100%;" value="${(note.driverName || '').replace(/"/g,'&quot;')}">
+      </div>
+      <div class="field" style="margin-top:8px;">
+        <label>Vehicle registration</label>
+        <input type="text" id="pendingVehicleReg" placeholder="e.g. CA 123-456" style="width:100%;" value="${(note.vehicleReg || '').replace(/"/g,'&quot;')}">
+      </div>
+      <div class="field" style="margin-top:8px;">
+        <label>Driver signature</label>
+        <div class="sigwrap"><canvas id="pendingDriverSig"></canvas></div>
+        <div class="sig-actions">
+          <span class="sig-hint">Driver signs to confirm items loaded</span>
+          <button type="button" class="btn btn-sm" onclick="clearSignature('pendingDriverSig')">Clear</button>
+        </div>
+        <div id="pendingDriverErr" style="color:var(--rust);font-size:12px;margin-top:8px;display:none;">Driver signature required</div>
+        <button type="button" class="btn btn-primary btn-sm" style="margin-top:8px;" onclick="confirmDriverSignaturePending('${note.id}')">Save driver signature</button>
+      </div>` : `
+      <div class="field" style="margin-top:14px;">
+        <label class="sig-hint">Driver signature — saved${note.driverSignedDate ? ' ' + note.driverSignedDate : ''}${note.driverName ? ' · ' + note.driverName : ''}${note.vehicleReg ? ' · ' + note.vehicleReg : ''}</label>
+      </div>`}
+
+      <div class="field" style="margin-top:14px;">
+        <label>Site signature</label>
+        <input type="text" id="siteSignerName" placeholder="Name of person signing" style="width:100%;margin-bottom:8px;" value="${(note.siteSignedBy || '').replace(/"/g,'&quot;')}">
+        <div class="sigwrap"><canvas id="siteSigCanvas"></canvas></div>
+        <div class="sig-actions">
+          <span class="sig-hint">Site contact signs to confirm receipt — locks this note</span>
+          <button type="button" class="btn btn-sm" onclick="clearSignature('siteSigCanvas')">Clear</button>
+        </div>
+      </div>
+      <div id="siteSigErr" style="color:var(--rust);font-size:12px;margin-top:8px;display:none;">Site signature required to lock this note</div>
+      <div class="modal-actions">
+        <button class="btn" onclick="closeModal()">Close for now</button>
+        <button class="btn" onclick="openEditNote('${note.id}')">Edit customer / signature</button>
+        <button class="btn" onclick="openSigningDetails('${note.id}')">Edit signing details</button>
+        <button class="btn btn-primary" onclick="confirmSiteSignature('${note.id}')">Submit site signature &amp; lock</button>
+      </div>
+    </div>
+  </div>`;
+  if(!note.driverSignature) setupSignaturePad('pendingDriverSig');
+  setupSignaturePad('siteSigCanvas');
+}
+
+function confirmDriverSignaturePending(noteId){
+  const note = state.notes.find(n => n.id === noteId);
+  if(!note) return;
+  const driverSig = getSignatureDataUrl('pendingDriverSig');
+  if(!driverSig){
+    document.getElementById('pendingDriverErr').style.display = 'block';
+    return;
+  }
+  const nameInput = document.getElementById('pendingDriverName');
+  const regInput = document.getElementById('pendingVehicleReg');
+  if(nameInput) note.driverName = nameInput.value.trim();
+  if(regInput) note.vehicleReg = regInput.value.trim();
+  note.driverSignature = driverSig;
+  note.driverSignedDate = todayStr();
+  save();
+  render();
+  viewNote(noteId);
+}
+
+function openSigningDetails(noteId){
+  const note = state.notes.find(n => n.id === noteId);
+  if(!note) return;
+  const layer = document.getElementById('modalLayer');
+  layer.innerHTML = `<div class="modal-bg" id="sigDetailsBg">
+    <div class="modal">
+      <h3>Signing details</h3>
+      <div class="hint">${note.number} — doesn't touch items or the signature images</div>
+      <div class="field">
+        <label>Driver name</label>
+        <input type="text" id="sdDriverName" style="width:100%;" value="${(note.driverName || '').replace(/"/g,'&quot;')}">
+      </div>
+      <div class="field" style="margin-top:12px;">
+        <label>Vehicle registration</label>
+        <input type="text" id="sdVehicleReg" style="width:100%;" value="${(note.vehicleReg || '').replace(/"/g,'&quot;')}">
+      </div>
+      <div class="field" style="margin-top:12px;">
+        <label>Site signer name</label>
+        <input type="text" id="sdSignerName" style="width:100%;" value="${(note.siteSignedBy || '').replace(/"/g,'&quot;')}">
+      </div>
+      <div class="field" style="margin-top:12px;">
+        <label>Driver signed date</label>
+        <input type="text" id="sdDriverDate" placeholder="e.g. 18 Aug 2026" style="width:100%;" value="${(note.driverSignedDate || '').replace(/"/g,'&quot;')}">
+      </div>
+      <div class="field" style="margin-top:12px;">
+        <label>Site signed date</label>
+        <input type="text" id="sdSiteDate" placeholder="e.g. 18 Aug 2026" style="width:100%;" value="${(note.siteSignedDate || '').replace(/"/g,'&quot;')}">
+      </div>
+      <div class="modal-actions">
+        <button class="btn" onclick="viewNote('${note.id}')">Cancel</button>
+        <button class="btn btn-primary" onclick="saveSigningDetails('${note.id}')">Save</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function saveSigningDetails(noteId){
+  const note = state.notes.find(n => n.id === noteId);
+  if(!note) return;
+  note.driverName = document.getElementById('sdDriverName').value.trim();
+  note.vehicleReg = document.getElementById('sdVehicleReg').value.trim();
+  note.siteSignedBy = document.getElementById('sdSignerName').value.trim();
+  note.driverSignedDate = document.getElementById('sdDriverDate').value.trim();
+  note.siteSignedDate = document.getElementById('sdSiteDate').value.trim();
+  save();
+  render();
+  if(isNoteComplete(note)) saveDispatchRecordToDrive(note);
+  viewNote(noteId);
+}
+
+function removeNoteItem(noteId, stockItemId){
+  const note = state.notes.find(n => n.id === noteId);
+  if(!note) return;
+  if(note.items.length <= 1){
+    alert('A dispatch note needs at least one item. Close this note and add items back to Finished stock manually if you dispatched by mistake.');
+    return;
+  }
+  const stockItem = state.items.find(it => it.id === stockItemId);
+  if(stockItem){
+    stockItem.status = 'vinaged';
+    stockItem.dispatchedDate = null;
+    stockItem.noteId = null;
+  }
+  note.items = note.items.filter(x => x.stockItemId !== stockItemId);
+  save();
+  render();
+  viewNote(noteId);
+}
+
+function addFinishedItemToNote(noteId){
+  const note = state.notes.find(n => n.id === noteId);
+  if(!note) return;
+  const select = document.getElementById('addFromFinished');
+  const stockItemId = select.value;
+  if(!stockItemId) return;
+  const it = state.items.find(x => x.id === stockItemId);
+  if(!it) return;
+  const date = todayStr();
+  it.status = 'dispatched';
+  it.dispatchedDate = date;
+  it.noteId = noteId;
+  note.items.push({ stockItemId: it.id, type: it.type, qty: it.qty, ref: it.ref });
+  save();
+  render();
+  viewNote(noteId);
+}
+
+function addAdhocItemToNote(noteId){
+  const note = state.notes.find(n => n.id === noteId);
+  if(!note) return;
+  const type = document.getElementById('addAdhocType').value;
+  const qty = Math.max(1, parseInt(document.getElementById('addAdhocQty').value) || 1);
+  const ref = document.getElementById('addAdhocRef').value.trim();
+  const date = todayStr();
+  consumeFromStatus('vinaged', type, qty);
+
+  const existingLine = note.items.find(x => x.type === type && (x.ref || '') === (ref || ''));
+  const existingStockItem = existingLine ? state.items.find(si => si.id === existingLine.stockItemId) : null;
+  if(existingLine && existingStockItem){
+    existingStockItem.qty += qty;
+    existingLine.qty += qty;
+  } else {
+    const item = {
+      id: uid(), type, qty, ref,
+      status: 'dispatched',
+      addedDate: date,
+      vinagedDate: date,
+      dispatchedDate: date,
+      noteId: noteId
+    };
+    state.items.push(item);
+    note.items.push({ stockItemId: item.id, type, qty, ref });
+  }
+  save();
+  render();
+  viewNote(noteId);
+}
+
+function confirmSiteSignature(noteId){
+  const note = state.notes.find(n => n.id === noteId);
+  if(!note) return;
+  const siteSig = getSignatureDataUrl('siteSigCanvas');
+  if(!siteSig){
+    const err = document.getElementById('siteSigErr');
+    err.style.display = 'block';
+    return;
+  }
+  const nameInput = document.getElementById('siteSignerName');
+  note.siteSignedBy = nameInput ? nameInput.value.trim() : (note.siteSignedBy || '');
+  note.siteSignature = siteSig;
+  note.siteSignedDate = todayStr();
+  save();
+  render();
+  exportDaySheet(true);
+  viewNote(noteId);
+  saveDispatchRecordToDrive(note);
+}
+
+function openEditNote(noteId){
+  const note = state.notes.find(n => n.id === noteId);
+  if(!note) return;
+  const existingDriver = note.driverSignature || null;
+  const existingSite = note.siteSignature || note.signature || null;
+  const layer = document.getElementById('modalLayer');
+  layer.innerHTML = `<div class="modal-bg" id="editBg">
+    <div class="modal" style="max-width:480px;">
+      <h3>Edit dispatch note</h3>
+      <div class="hint">${note.number}</div>
+      <div class="field">
+        <label>Customer / destination</label>
+        <input type="text" id="editCustInput" style="width:100%;" value="${note.customer.replace(/"/g,'&quot;')}">
+      </div>
+
+      <div class="field" style="margin-top:14px;">
+        <label>Driver signature</label>
+        ${existingDriver ? `<div class="docket-sig" style="background:#F3EEDF;border-radius:4px;padding:8px 10px;"><img src="${existingDriver}" alt="Current driver signature" style="max-width:180px;"></div>` : `<div class="sig-hint" style="margin-bottom:6px;">No driver signature on file</div>`}
+      </div>
+      <div class="field" style="margin-top:8px;">
+        <div class="sigwrap"><canvas id="editDriverSig"></canvas></div>
+        <div class="sig-actions">
+          <span class="sig-hint">Draw here to ${existingDriver ? 'replace' : 'add'} the driver signature</span>
+          <button type="button" class="btn btn-sm" onclick="clearSignature('editDriverSig')">Clear</button>
+        </div>
+      </div>
+
+      <div class="field" style="margin-top:18px;">
+        <label>Site signature</label>
+        ${existingSite ? `<div class="docket-sig" style="background:#F3EEDF;border-radius:4px;padding:8px 10px;"><img src="${existingSite}" alt="Current site signature" style="max-width:180px;"></div>` : `<div class="sig-hint" style="margin-bottom:6px;">No site signature on file</div>`}
+      </div>
+      <div class="field" style="margin-top:8px;">
+        <label>Signed by</label>
+        <input type="text" id="editSiteSignerName" placeholder="Name of person signing" style="width:100%;" value="${(note.siteSignedBy || '').replace(/"/g,'&quot;')}">
+      </div>
+      <div class="field" style="margin-top:8px;">
+        <div class="sigwrap"><canvas id="editSiteSig"></canvas></div>
+        <div class="sig-actions">
+          <span class="sig-hint">Draw here to ${existingSite ? 'replace' : 'add'} the site signature</span>
+          <button type="button" class="btn btn-sm" onclick="clearSignature('editSiteSig')">Clear</button>
+        </div>
+      </div>
+
+      <div class="modal-actions">
+        <button class="btn" onclick="viewNote('${note.id}')">Cancel</button>
+        <button class="btn btn-primary" onclick="saveEditedNote('${note.id}')">Save changes</button>
+      </div>
+    </div>
+  </div>`;
+  setupSignaturePad('editDriverSig');
+  setupSignaturePad('editSiteSig');
+}
+
+function saveEditedNote(noteId){
+  const note = state.notes.find(n => n.id === noteId);
+  if(!note) return;
+  const cust = document.getElementById('editCustInput').value.trim();
+  if(cust) note.customer = cust;
+
+  const nameInput = document.getElementById('editSiteSignerName');
+  if(nameInput) note.siteSignedBy = nameInput.value.trim();
+
+  const newDriver = getSignatureDataUrl('editDriverSig');
+  const newSite = getSignatureDataUrl('editSiteSig');
+  if(newDriver) note.driverSignedDate = todayStr();
+  if(newSite) note.siteSignedDate = todayStr();
+  note.driverSignature = newDriver || note.driverSignature || null;
+  note.siteSignature = newSite || note.siteSignature || note.signature || null;
+  delete note.signature;
+
+  save();
+  render();
+  if(isNoteComplete(note)) saveDispatchRecordToDrive(note);
+  viewNote(noteId);
+}
+
+async function generateDocketImage(note){
+  const printArea = document.getElementById('printArea');
+  if(!printArea || !window.html2canvas) return null;
+  try{
+    const canvas = await html2canvas(printArea, { backgroundColor: '#F3EEDF', scale: 2 });
+    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+    if(!blob) return null;
+    return new File([blob], `${note.number}.png`, { type: 'image/png' });
+  }catch(e){
+    console.error('docket image generation failed', e);
+    return null;
+  }
+}
+
+function noteTextLines(note){
+  return [
+    `Dispatch note ${note.number}`,
+    `Date: ${note.date}`,
+    `To: ${note.customer}`,
+    isNoteComplete(note) ? 'Signed: Yes' : 'Signed: No',
+    '',
+    ...note.items.map(x => `- ${x.type}${x.ref ? ' (' + x.ref + ')' : ''} x${x.qty}`)
+  ];
+}
+
+async function shareWhatsApp(noteId){
+  const note = state.notes.find(n => n.id === noteId);
+  if(!note) return;
+
+  if(navigator.share){
+    const file = await generateDocketImage(note);
+    if(file && (!navigator.canShare || navigator.canShare({ files: [file] }))){
+      try{
+        await navigator.share({ files: [file], title: `Dispatch note ${note.number}`, text: `Dispatch note ${note.number} — ${note.customer}` });
+        return;
+      }catch(e){
+        if(e && e.name === 'AbortError') return;
+        console.error('image share failed, falling back to text', e);
+      }
+    }
+  }
+
+  const text = noteTextLines(note).join('\n');
+  window.open('https://wa.me/?text=' + encodeURIComponent(text), '_blank');
+}
+
+async function shareEmail(noteId){
+  const note = state.notes.find(n => n.id === noteId);
+  if(!note) return;
+
+  if(navigator.share){
+    const file = await generateDocketImage(note);
+    if(file && (!navigator.canShare || navigator.canShare({ files: [file] }))){
+      try{
+        await navigator.share({ files: [file], title: `Dispatch note ${note.number}`, text: `Dispatch note ${note.number} — ${note.customer}` });
+        return;
+      }catch(e){
+        if(e && e.name === 'AbortError') return;
+        console.error('image share failed, falling back to mailto', e);
+      }
+    }
+  }
+
+  const subject = `Dispatch note ${note.number}`;
+  const body = noteTextLines(note).join('\n');
+  window.location.href = 'mailto:?subject=' + encodeURIComponent(subject) + '&body=' + encodeURIComponent(body);
+}
+
+function viewAllNotes(){
+  const layer = document.getElementById('modalLayer');
+  if(state.notes.length === 0){
+    layer.innerHTML = `<div class="modal-bg" id="allBg"><div class="modal"><h3>Dispatch notes</h3><div class="hint">None created yet</div><div class="modal-actions"><button class="btn" onclick="closeModal()">Close</button></div></div></div>`;
+    return;
+  }
+  layer.innerHTML = `<div class="modal-bg" id="allBg"><div class="modal" style="max-width:460px;">
+    <h3>Dispatch notes</h3>
+    <div class="hint">${state.notes.length} created</div>
+    <div style="display:flex;flex-direction:column;gap:8px;max-height:340px;overflow:auto;">
+      ${state.notes.slice().reverse().map(n => `<div class="card" style="cursor:pointer;" onclick="viewNote('${n.id}')">
+        <div class="card-top"><div class="card-type" style="font-size:15px;">${n.number}</div><span class="card-qty">${n.date}</span></div>
+        <div class="card-ref">${n.customer}${isNoteComplete(n) ? '' : ' &middot; awaiting site signature'}</div>
+      </div>`).join('')}
+    </div>
+    <div class="modal-actions"><button class="btn" onclick="closeModal()">Close</button></div>
+  </div></div>`;
+}
+
+document.getElementById('notesBtn').addEventListener('click', viewAllNotes);
+document.getElementById('driveBtn').addEventListener('click', onDriveBtnClick);
+
+const DRIVE_FILE_NAME = 'oakjoinery-stock-board.json';
+const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive';
+
+function updateDriveUi(){
+  const dot = document.getElementById('driveDot');
+  const label = document.getElementById('driveLabel');
+  dot.className = 'drive-dot' + (drive.status === 'connected' ? ' on' : drive.status === 'syncing' ? ' syncing' : drive.status === 'error' ? ' err' : '');
+  const labels = {
+    disconnected: 'Google Drive',
+    connected: 'Drive: synced',
+    syncing: 'Drive: syncing…',
+    error: 'Drive: error'
+  };
+  label.textContent = labels[drive.status] || 'Google Drive';
+}
+
+function setDriveStatus(s){
+  drive.status = s;
+  updateDriveUi();
+}
+
+function onDriveBtnClick(){
+  if(!drive.clientId || drive.status === 'disconnected' || drive.status === 'error'){
+    openDriveSettings();
+  } else {
+    openDriveSettings();
+  }
+}
+
+function openDriveSettings(){
+  const layer = document.getElementById('modalLayer');
+  const connected = drive.status === 'connected' && driveAccessToken;
+  layer.innerHTML = `<div class="modal-bg" id="driveBg">
+    <div class="modal">
+      <h3>Google Drive</h3>
+      <div class="hint">${connected ? 'Connected — stock data syncs to your Drive automatically.' : 'Paste your Google OAuth Client ID to connect this board to your Drive.'}</div>
+      ${!connected ? `
+      <div class="field">
+        <label>OAuth Client ID</label>
+        <input type="text" id="clientIdInput" placeholder="xxxx.apps.googleusercontent.com" style="width:100%;" value="${drive.clientId || ''}">
+      </div>
+      <div id="driveErr" style="color:var(--rust);font-size:12px;margin-top:8px;display:none;"></div>
+      <div class="modal-actions">
+        <button class="btn" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveClientIdAndConnect()">Connect</button>
+      </div>` : `
+      <div class="modal-actions">
+        <button class="btn" onclick="closeModal()">Close</button>
+        <button class="btn btn-rust" onclick="disconnectDrive()">Disconnect</button>
+      </div>`}
+    </div>
+  </div>`;
+}
+
+function saveClientIdAndConnect(){
+  const id = document.getElementById('clientIdInput').value.trim();
+  if(!id){
+    const err = document.getElementById('driveErr');
+    err.textContent = 'Enter a Client ID first';
+    err.style.display = 'block';
+    return;
+  }
+  drive.clientId = id;
+  save();
+  closeModal();
+  connectDrive();
+}
+
+function ensureTokenClient(){
+  if(!window.google || !google.accounts || !google.accounts.oauth2){
+    return null;
+  }
+  if(tokenClient) return tokenClient;
+  tokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: drive.clientId,
+    scope: DRIVE_SCOPE,
+    callback: (resp) => {
+      if(resp.error){
+        setDriveStatus('error');
+        return;
+      }
+      driveAccessToken = resp.access_token;
+      onDriveSignedIn();
+    }
+  });
+  return tokenClient;
+}
+
+function connectDrive(){
+  const tc = ensureTokenClient();
+  if(!tc){
+    alert('Google sign-in library is still loading — wait a second and click Google Drive again.');
+    return;
+  }
+  setDriveStatus('syncing');
+  tc.requestAccessToken({ prompt: 'consent' });
+}
+
+function tryAutoReconnectDrive(){
+  setTimeout(() => {
+    const tc = ensureTokenClient();
+    if(!tc) return;
+    tc.requestAccessToken({ prompt: '' });
+  }, 400);
+}
+
+function disconnectDrive(){
+  driveAccessToken = null;
+  drive.fileId = '';
+  setDriveStatus('disconnected');
+  save();
+  closeModal();
+}
+
+async function driveApiFetch(url, options){
+  options = options || {};
+  const headers = Object.assign({ Authorization: 'Bearer ' + driveAccessToken }, options.headers || {});
+  const res = await fetch(url, Object.assign({}, options, { headers }));
+  if(res.status === 401){
+    driveAccessToken = null;
+    setDriveStatus('error');
+    throw new Error('Drive session expired — reconnect');
+  }
+  if(!res.ok){
+    const text = await res.text().catch(() => '');
+    throw new Error('Drive API ' + res.status + ' ' + text);
+  }
+  return res;
+}
+
+async function findDriveFile(){
+  const q = encodeURIComponent(`name='${DRIVE_FILE_NAME}' and trashed=false`);
+  const res = await driveApiFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,modifiedTime)&spaces=drive`);
+  const data = await res.json();
+  return (data.files && data.files[0]) || null;
+}
+
+async function downloadDriveFile(fileId){
+  const res = await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`);
+  return res.json();
+}
+
+async function createDriveFile(content){
+  const boundary = 'oakjoinery-boundary-xyz';
+  const metadata = { name: DRIVE_FILE_NAME, mimeType: 'application/json' };
+  const body =
+    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n` +
+    `--${boundary}\r\nContent-Type: application/json\r\n\r\n${content}\r\n` +
+    `--${boundary}--`;
+  const res = await driveApiFetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', {
+    method: 'POST',
+    headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
+    body
+  });
+  return res.json();
+}
+
+async function updateDriveFile(fileId, content){
+  await driveApiFetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: content
+  });
+}
+
+const DISPATCH_RECORDS_FOLDER = 'Oak Joinery Dispatch Notes';
+let dispatchFolderIdCache = null;
+
+async function findOrCreateDriveFolder(name){
+  const q = encodeURIComponent(`name='${name.replace(/'/g,"\\'")}' and mimeType='application/vnd.google-apps.folder' and trashed=false`);
+  const res = await driveApiFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)&spaces=drive`);
+  const data = await res.json();
+  if(data.files && data.files[0]) return data.files[0].id;
+  const res2 = await driveApiFetch('https://www.googleapis.com/drive/v3/files?fields=id', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, mimeType: 'application/vnd.google-apps.folder' })
+  });
+  const created = await res2.json();
+  return created.id;
+}
+
+async function createDriveBinaryFile(name, blob, mimeType, folderId){
+  const boundary = 'oakjoinery-boundary-rec';
+  const metadata = { name, mimeType, parents: [folderId] };
+  const metaPart = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n`;
+  const closePart = `\r\n--${boundary}--`;
+  const body = new Blob([metaPart, blob, closePart]);
+  const res = await driveApiFetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', {
+    method: 'POST',
+    headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
+    body
+  });
+  return res.json();
+}
+
+async function updateDriveBinaryFile(fileId, blob, mimeType){
+  await driveApiFetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': mimeType },
+    body: blob
+  });
+}
+
+async function generateDocketPdfBlob(){
+  const printArea = document.getElementById('printArea');
+  if(!printArea || !window.html2canvas || !window.jspdf) return null;
+  const canvas = await html2canvas(printArea, { backgroundColor: '#F3EEDF', scale: 2 });
+  const imgData = canvas.toDataURL('image/png');
+  const { jsPDF } = window.jspdf;
+  const pdf = new jsPDF({ unit: 'px', format: [canvas.width, canvas.height] });
+  pdf.addImage(imgData, 'PNG', 0, 0, canvas.width, canvas.height);
+  return pdf.output('blob');
+}
+
+async function saveDispatchRecordToDrive(note){
+  if(!driveAccessToken) return { ok: false, reason: 'not-connected' };
+  try{
+    const pdfBlob = await generateDocketPdfBlob();
+    if(!pdfBlob) return { ok: false, reason: 'render-failed' };
+    if(note.driveFileId){
+      await updateDriveBinaryFile(note.driveFileId, pdfBlob, 'application/pdf');
+    } else {
+      if(!dispatchFolderIdCache) dispatchFolderIdCache = await findOrCreateDriveFolder(DISPATCH_RECORDS_FOLDER);
+      const fileName = `${note.number} - ${note.customer}.pdf`;
+      const created = await createDriveBinaryFile(fileName, pdfBlob, 'application/pdf', dispatchFolderIdCache);
+      note.driveFileId = created.id;
+    }
+    await persistLocal();
+    return { ok: true };
+  }catch(e){
+    console.error('dispatch record upload failed', e);
+    return { ok: false, reason: 'error' };
+  }
+}
+
+async function manualSaveRecord(noteId){
+  const note = state.notes.find(n => n.id === noteId);
+  if(!note) return;
+  if(!driveAccessToken){
+    alert('Connect Google Drive first (top toolbar) to save a copy of this note.');
+    return;
+  }
+  const result = await saveDispatchRecordToDrive(note);
+  if(result.ok){
+    render();
+    viewNote(noteId);
+  } else {
+    alert('Could not save a copy to Drive — try again in a moment.');
+  }
+}
+
+async function onDriveSignedIn(){
+  try{
+    let remote = null;
+    if(drive.fileId){
+      try{ remote = await downloadDriveFile(drive.fileId); }
+      catch(e){ drive.fileId = ''; }
+    }
+    if(!remote){
+      const existing = await findDriveFile();
+      if(existing){
+        drive.fileId = existing.id;
+        remote = await downloadDriveFile(existing.id);
+      }
+    }
+    if(remote){
+      state.items = remote.items || [];
+      state.notes = remote.notes || [];
+      nextNo = remote.nextNo || nextNo;
+      itemTypes = (remote.itemTypes && remote.itemTypes.length) ? remote.itemTypes : itemTypes;
+      renderTypeSelects();
+      render();
+      await persistLocal();
+    } else {
+      await pushToDrive();
+    }
+    setDriveStatus('connected');
+  }catch(e){
+    console.error(e);
+    setDriveStatus('error');
+  }
+}
+
+async function persistLocal(){
+  try{
+    await storage.set('board', JSON.stringify({items: state.items, notes: state.notes, nextNo, itemTypes, drive: {clientId: drive.clientId, fileId: drive.fileId}}), false);
+  }catch(e){ console.error('storage failed', e); }
+}
+
+function queueDriveSync(){
+  if(!driveAccessToken) return;
+  clearTimeout(driveSyncTimer);
+  driveSyncTimer = setTimeout(pushToDrive, 800);
+}
+
+async function pushToDrive(){
+  if(!driveAccessToken) return;
+  setDriveStatus('syncing');
+  try{
+    const content = JSON.stringify({items: state.items, notes: state.notes, nextNo, itemTypes});
+    if(!drive.fileId){
+      const existing = await findDriveFile();
+      if(existing) drive.fileId = existing.id;
+    }
+    if(drive.fileId){
+      await updateDriveFile(drive.fileId, content);
+    } else {
+      const created = await createDriveFile(content);
+      drive.fileId = created.id;
+    }
+    await persistLocal();
+    setDriveStatus('connected');
+  }catch(e){
+    console.error(e);
+    setDriveStatus('error');
+  }
+}
+
+load();
+</script>
+</body>
+</html>
