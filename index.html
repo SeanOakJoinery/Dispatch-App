@@ -5,13 +5,257 @@ OAK JOINERY STOCK BOARD — INTERNAL BUILD NOTES (read this first)
 ========================================================================
 This comment is for an AI assistant (e.g. Claude) asked to modify this
 file in a future session. It is invisible in the rendered app — only
-visible in the raw source — so read it before making any changes, and
-UPDATE it whenever you add or change a feature, so it stays accurate.
+visible in the raw source — so READ THIS WHOLE COMMENT BLOCK, STARTING
+WITH THE CHANGELOG BELOW, BEFORE DOING ANYTHING ELSE, the moment this
+file is opened — whether uploaded, fetched, or edited directly. After
+making ANY change, add a new entry to the TOP of the CHANGELOG (most
+recent first) before finishing that turn — do this for every change,
+no matter how small, and do it as soon as the change is made, not
+batched up later. Also update the relevant reference section below
+(COMPANY/LETTERHEAD, DATA MODEL, etc.) if the change affects it.
+
+========================================================================
+CHANGELOG (most recent first — add a new dated entry after every change)
+========================================================================
+- 2026-09-03 (later still): Two per-user requests:
+    1. ALPHABETICAL SORT — renderCol() now sorts each column's cards by
+       item.type (localeCompare, case-insensitive) instead of reverse-
+       insertion order. Self-sorting: no manual re-sort needed, any
+       add/edit just re-renders in alphabetical order automatically.
+       Mirrored the same change on the stock-list app (items sorted by
+       desc within each category).
+    2. DISPATCHED-COLUMN ARCHIVING — once a delivery note is fully
+       signed off (isNoteComplete(note) true — site signature present),
+       its items now disappear from the main "Dispatched" column
+       entirely (filtered out in render(), see the archivedCount logic)
+       rather than piling up forever. NOTHING is deleted — the items
+       and note stay in state.items/state.notes exactly as before; they
+       just aren't rendered on the board. They're still fully
+       accessible via the existing "Delivery notes" list/viewNote() —
+       that was already a complete record of every note, complete or
+       not, so no new "archive" screen was needed. A small hint line
+       under the Dispatched header ("N completed deliveries — signed
+       off and hidden here, view under 'Delivery notes'") shows the
+       count so it doesn't look like items vanished. If a note has NO
+       associated stock item findable, or note lookup fails, items stay
+       visible (fail open, not hidden) — don't change that without a
+       good reason, hiding stock silently on a lookup failure is worse
+       than a cluttered column.
+- 2026-09-03 (later same day): Slowed cross-device sync polling from
+  every 20s to every 2 minutes (startCloudPolling), per user request
+  ("autosync every couple of minutes"). 20s per device adds up fast on
+  jsonbin's free tier across several staff phones/laptops. Push-on-save
+  (queueCloudSync) and pull-on-window-focus are UNCHANGED — so a save
+  still reaches other devices quickly when they're actively open, this
+  only slows the background "check for changes while idle" polling.
+  Mirrored the same change on the stock-list app (index-jsonbin.html) —
+  keep both at the same interval if this changes again.
+- 2026-09-03: Security hardening pass, per user request ("optimize
+  security"). Three real, meaningful improvements within what a
+  static/client-side app can actually do — NONE of this makes it a real
+  secured backend, see caveat repeated below:
+    1. STORED XSS FIX (the actual vulnerability, unrelated to the
+       login system) — item descriptions, references, usernames, and
+       delivery-note fields (customer, driver name, vehicle reg, site
+       signer name) were being inserted into innerHTML templates
+       WITHOUT escaping. Since add-item/username/note fields are
+       free-text typed by any user, someone typing e.g.
+       "<img src=x onerror=...>" as an item description would have it
+       executed for anyone viewing that card/note/PDF. Added escHtml()
+       (near uid()/todayStr()) and wrapped every such interpolation
+       site in it — see the many `escHtml(...)` calls throughout
+       cardHtml, renderCartPanel, the delivery-note view/edit/sign
+       modals, Manage Items, and the login screens. ALWAYS wrap new
+       user-typed text in escHtml() before putting it in an innerHTML
+       template — this is the one part of this pass that matters
+       regardless of the login system's limitations.
+       Also changed "Manage items" removal from
+       removeItemType(name) — which embedded raw user text inside an
+       onclick JS-string argument, a second injection vector via
+       attribute-breakout — to removeItemTypeAt(index), removing the
+       string entirely from the onclick attribute.
+    2. PINS ARE NOW HASHED (SHA-256, hashPin()) instead of stored
+       plaintext — so reading the synced jsonbin data or local storage
+       doesn't hand someone every PIN directly. attemptLogin() hashes
+       the entered PIN and compares hashes. The "Edit user" PIN field
+       no longer shows/requires the existing value — it's blank with
+       "Leave blank to keep current PIN" and only re-hashes if
+       something new is typed (saveUserForm is now async because of
+       this). Not reversible-proof against someone with the hash and
+       real motivation to crack a short numeric PIN, but a real step
+       up from plaintext.
+    3. LOGIN LOCKOUT + IDLE AUTO-LOGOUT — 5 wrong PIN attempts locks
+       that user out for 30s (loginAttempts{}, in-memory, resets on
+       reload — just a deterrent against someone sitting there
+       guessing). 20-minute inactivity auto-logs-out
+       (IDLE_TIMEOUT_MS/resetIdleTimer(), reset on any click/keydown/
+       touchstart) so a phone left unlocked on a bench doesn't stay
+       logged in as root indefinitely.
+  REPEATING THE CAVEAT FROM 2026-09-01 because it still applies after
+  all of this: this is a deterrent for normal staff use, NOT a real
+  security boundary. Anyone with browser devtools can still read the
+  in-memory permissions object, flip currentUserId, or call a guarded
+  function directly from the console. If the user ever asks for this
+  to be genuinely secure (e.g. protecting something with real stakes),
+  say plainly that a static file with no backend can't do that, and
+  that it would need a real server-side auth system instead.
+- 2026-09-02: Removed the "Root override — this note is locked..." banner
+  from the root-override edit view (per user request) — the editable
+  branch for a locked note now looks identical to the normal pending-note
+  edit view, just with the extra Print/Email/WhatsApp/Save-to-Drive
+  buttons and the site-signature button relabeled "Update site signature".
+  rootOverride itself is unchanged; only the banner markup was deleted.
+- 2026-09-02: Root users can now edit locked (signed) delivery notes,
+  per user request. viewNote() computes `rootOverride = isNoteComplete(note)
+  && getCurrentUser().isRoot` and, when true, renders the editable
+  (pending-note) branch instead of the locked read-only docket branch —
+  add/remove items, "Edit customer / signature", and a site-signature
+  canvas relabeled "Update site signature" (vs "...& lock") all become
+  available, with a rust-colored "Root override — this note is locked..."
+  banner shown above the docket so it reads clearly as an override, not
+  an unlocked note. The normally locked-view-only Print/Email/WhatsApp/
+  Save-to-Drive buttons are appended to this branch's action row too, so
+  root doesn't lose them. No changes were needed to removeNoteItem,
+  addFinishedItemToNote, addAdhocItemToNote, confirmSiteSignature, or
+  openEditNote/saveEditedNote — none of them actually checked
+  isNoteComplete; the lock was always enforced purely by which branch
+  viewNote() rendered. Non-root users are unaffected — same locked
+  read-only view as before, still gated by manageNotes as always.
+- 2026-09-02: Flipped item-add default from "pick from list" to "always
+  one-off", per user request:
+    All three add forms (Unfinished/typeCustomInput, Finished/
+    typeCustomInputFin, Dispatched quick-add/typeCustomInputDis) now
+    show a single free-text input by default (with a shared <datalist
+    id="itemTypesList"> for autocomplete suggestions from itemTypes[],
+    so existing names still autofill as you type). The old <select
+    id="typeSelect(Fin/Dis)"> elements and their show/hide toggle
+    listeners were removed entirely. The checkbox next to each input
+    was renamed "One-off item (not saved to list)" -> "Add to list"
+    and its meaning inverted: unchecked (default) = one-off, itemTypes[]
+    untouched, exactly as before; checked = the typed name is pushed
+    into itemTypes[] (if not already present) and renderTypeSelects()
+    is called to refresh the datalist, same as Manage Items does.
+    renderTypeSelects() itself now populates #itemTypesList instead of
+    the removed selects. The Dispatched quick-add handler didn't
+    previously call save() (dispatchCart is transient until note
+    submission) so an explicit save() was added there specifically for
+    the addToList branch, so a new itemTypes[] entry still persists/
+    syncs even if the cart itself doesn't. The separate "ad-hoc item"
+    select inside the delivery-note edit modal (addAdhocType, ~line
+    1414) was left unchanged — it's for adding an existing catalog item
+    to an already-created note, not for creating new item types.
+- 2026-09-01: Added a client-side login/permissions system and one-off
+  (not-in-catalog) item entry, per user request:
+    1. USERS & PERMISSIONS — new users[] array (see CORE DATA MODEL and
+       "USERS & PERMISSIONS" section below), synced via jsonbin like
+       everything else in the board blob. First launch shows a
+       "Set up root account" screen (createRootAccount) since users[]
+       starts empty; after that, a "Who's this?" picker (showLoginScreen/
+       promptPin/attemptLogin) gates the whole app behind #loginOverlay
+       (position:fixed, z-index 200, blocks the UI underneath without
+       restructuring the DOM). Session (currentUserId) is stored
+       separately via storage.set('currentUserId', ...) — device-local,
+       NOT synced, so each device/browser stays logged in as whoever
+       last logged in there. "Manage users" toolbar button
+       (manageUsersBtn, gated by manageUsers permission) opens
+       openManageUsers() to add/edit/delete users and tick permission
+       checkboxes (PERMISSION_LABELS) or mark someone "root" (all
+       permissions, can't be fully deleted if they're the last root).
+       can(key) checks root-bypass then the permissions object; called
+       both to hide/show UI (applyPermissionsToUi) AND as a guard at
+       the top of the underlying functions themselves (removeItem,
+       markVinaged, addToDispatchCart, startDispatchFromCart, viewNote,
+       viewAllNotes, openManageTypes, combineDuplicates, exportDaySheet,
+       onDriveBtnClick, openSyncSettings) — belt and braces, since
+       hiding a button doesn't stop someone calling the JS function
+       directly. IMPORTANT CAVEAT (told to the user): this is a
+       deterrent for normal staff use, NOT real security — anyone with
+       browser devtools could bypass it or read PINs from the synced
+       jsonbin data. Don't oversell it as secure if asked to extend it.
+    2. ONE-OFF ITEMS — each of the three add forms (Unfinished/
+       typeSelect, Finished/typeSelectFin, Dispatched quick-add/
+       typeSelectDis) now has a "One-off item (not saved to list)"
+       checkbox that swaps the <select> for a free-text input
+       (typeCustomInput/Fin/Dis). The add handlers already never wrote
+       to itemTypes[] in the first place — Manage Items is the only
+       thing that does — so this was purely a UI gap (no way to type
+       free text) with no other logic to change. Gated by addItems
+       permission like the rest of the add forms.
+  Do not remove the permission guards inside functions even if it seems
+  redundant with the UI hiding — that's the actual enforcement point.
+- 2026-08-31: Split sync into two independent systems, per user request
+  (wanted the same jsonbin.io approach used on the separate stock-list
+  app, but Google's OAuth verification/test-user friction was too much
+  hassle for something used across multiple staff devices):
+    1. BOARD DATA (items/notes/itemTypes/nextNo) now syncs via
+       jsonbin.io instead of a Drive JSON file — see "BOARD DATA SYNC"
+       section below. New toolbar button "Sync across devices" +
+       cloudSync{apiKey,binId} state, pullFromCloud/pushToCloud/
+       createSharedBin/queueCloudSync functions, mirrors the pattern
+       already used on the stock-list app.
+    2. Google Drive is now used ONLY for archiving a permanent PDF copy
+       of each locked delivery note (the existing "Save to Drive"
+       button/saveDispatchRecordToDrive) — see updated "GOOGLE DRIVE"
+       section below. The old board-file sync functions (findDriveFile,
+       downloadDriveFile, createDriveFile, updateDriveFile, pushToDrive,
+       queueDriveSync) were REMOVED — don't reintroduce them; Drive no
+       longer stores oakjoinery-stock-board.json at all.
+  drive.fileId was dropped from persisted state (no longer meaningful);
+  drive is now just {clientId}. Drive connect/reconnect flow (OAuth
+  client ID input, ensureTokenClient, tryAutoReconnectDrive,
+  disconnectDrive) is UNCHANGED — same client ID, same "add test users"
+  requirement — it just no longer does anything with board data.
+- 2026-08-29: Renamed "Dispatch" to "Delivery note" in all user-facing
+  text: toolbar button, docket heading, modal titles ("Delivery note",
+  "Edit delivery note", "Delivery notes" list), card action buttons
+  ("Add to delivery note", "In delivery note", "View delivery note"),
+  the Dispatched column's add-item button, cart panel title ("Delivery
+  note in progress"), plain-text share summary, email subject, the
+  "needs at least one item" alert, and the "today's sheet" CSV column
+  header. Deliberately LEFT UNCHANGED: the "Dispatched" board column/
+  header, the internal item status value 'dispatched', dispatchedDate
+  field, dispatchCart/submitDispatch/showDispatchModal/
+  addToDispatchCart function & variable names, the Drive folder name
+  "Oak Joinery Dispatch Notes", the CSV export FILENAME, and the driver
+  signature label ("Dispatched & signed by driver") — these describe
+  the physical goods-movement status, not the document, so keep them
+  as "dispatch"/"dispatched" unless the user asks to change those too.
+- 2026-08-29: Restyled the app's main top header ("Stock board" title)
+  to reuse the same .header-card style as the delivery note letterhead
+  (gray card, divider, OAK/JOINERY logotype); toolbar buttons moved to
+  their own row below the card.
+- 2026-08-29: Restyled the delivery note letterhead to match Sean's
+  business card (gray rounded card, vertical divider, OAK/JOINERY
+  logotype lockup); VAT No now listed before Reg No.
+- 2026-08-28: Date formatting spells the month out in full everywhere
+  (todayStr) — "28 August 2026" instead of "28 Aug 2026".
+- 2026-08-28: Removed the "Ref" line from the delivery note entirely
+  (docket + plain-text share). Removed per-item reference from showing
+  next to each item's description in the review modal cart list;
+  Customer/destination is now pre-filled from the item ref(s) instead.
+- 2026-08-28: Reordered delivery note item rows to Item # / Qty /
+  Description (added item numbering, dropped ref from the description).
+- 2026-08-28: Added a QTY column to the delivery note, separated from
+  the description — applies to the shared docket template, so it
+  covers old notes too, not just new ones.
+========================================================================
 
 COMPANY / LETTERHEAD
 - Oak Joinery (Pty) Ltd, 16 Bowling Avenue, Kramerville, Johannesburg
-- Reg No: 2022/532088/07  ·  VAT No: 4390291278
-- Shown on every dispatch note docket (see docketHtml inside viewNote()).
+- VAT No: 4390291278  ·  Reg No: 2022/532088/07 (VAT listed first, Reg
+  underneath — matches Sean's business card ordering, don't flip back)
+- The business-card look (gray rounded card, vertical divider, "OAK" /
+  "JOINERY" logotype lockup on the right in light wide-letter-spaced
+  type) is a SHARED style: class `.header-card` (with `.lh-left`,
+  `.lh-divider`, `.lh-logo .lh-oak` / `.lh-joinery`). It's used in TWO
+  places — keep them in sync if you touch this style:
+    1. The delivery note letterhead (.docket-letterhead wraps
+       .header-card, see docketHtml inside viewNote())
+    2. The app's main top header / "Stock board" title (.topline
+       wraps .header-card, near the top of <body>) — its toolbar
+       buttons live in a separate `.toolbar` row underneath the card,
+       not inside it.
+  Don't revert either back to the old plain-text/underline header.
 
 DEPLOYMENT
 - Deployed as index.html on Netlify: https://chic-torrone-64d20f.netlify.app
@@ -19,22 +263,44 @@ DEPLOYMENT
   below). To ship a change: edit this file, user drags the updated
   index.html onto their existing Netlify project to redeploy.
 
-GOOGLE DRIVE SYNC
+BOARD DATA SYNC (jsonbin.io)
+- Live board data (items[], notes[], itemTypes[], nextNo) syncs via
+  jsonbin.io, the same approach used on the separate stock-list app —
+  NOT Google Drive. State: cloudSync = {apiKey, binId}, persisted
+  inside the "board" storage blob alongside items/notes/etc.
+- First device: user pastes their jsonbin API key (X-Master-Key),
+  leaves Bin ID blank, clicks "Create shared store" — createSharedBin()
+  POSTs to jsonbin and returns a Bin ID. Every other device: paste the
+  same API key + that Bin ID, click "Connect".
+- pullFromCloud()/pushToCloud() do GET/PUT against
+  https://api.jsonbin.io/v3/b/{binId}. queueCloudSync() debounces
+  pushToCloud() after save(). startCloudPolling() re-pulls every 2
+  minutes (changed from 20s on 2026-09-03 — 20s per device was way more
+  request volume than jsonbin's free tier easily allows across several
+  staff devices); also re-pulls on window focus. Mirrors the
+  stock-list app's sync functions closely — keep the two in sync if
+  you improve one.
+- This is separate from and independent of the Google Drive connection
+  below — a device can have jsonbin configured, Drive configured,
+  both, or neither.
+
+GOOGLE DRIVE (PDF archiving only — NOT board data sync)
 - OAuth Client ID (public, safe to reuse):
   137392962022-ru70duraegsu9r0v9oacglonndlg6b5q.apps.googleusercontent.com
-- Scope requested: https://www.googleapis.com/auth/drive (broad — lets a
-  second account, e.g. a driver, be granted access to just the shared
-  file via normal Drive sharing, not only files the app itself created).
-- Board data (items, notes, itemTypes, nextNo) syncs to one Drive file:
-  oakjoinery-stock-board.json
-- Each LOCKED dispatch note also saves as its own PDF into a Drive
-  folder: "Oak Joinery Dispatch Notes" (kept private — never shared with
-  the driver; only the JSON data file is shared with the driver, Editor
-  access).
+- Scope requested: https://www.googleapis.com/auth/drive
+- Google Drive is used for exactly ONE thing: when a delivery note is
+  locked, "Save to Drive" (saveDispatchRecordToDrive/manualSaveRecord)
+  renders the docket to a PDF (html2canvas + jsPDF) and uploads it into
+  a Drive folder called "Oak Joinery Dispatch Notes" (kept private —
+  never shared with the driver) as a permanent record. It does NOT
+  sync items/notes/itemTypes — that's jsonbin's job now (see above).
 - Google Cloud project is in "Testing" publish status — every Google
-  account that signs in (owner + driver) must be added under Google
-  Auth Platform > Audience > Test users first, or sign-in fails with
-  "Access blocked". Real Console step, not fixable in code.
+  account that signs in (owner + driver, if they need it) must be added
+  under Google Auth Platform > Audience > Test users first, or sign-in
+  fails with "Access blocked". Real Console step, not fixable in code.
+- drive.fileId was REMOVED from persisted state (Aug 2026) — it used
+  to point at the board's Drive JSON file, which no longer exists.
+  Persisted drive state is now just {clientId}.
 
 CORE DATA MODEL (persisted as one JSON blob under storage key "board")
 - state.items[]: { id, type, qty, ref, status: 'unvinaged'|'vinaged'|
@@ -51,8 +317,36 @@ CORE DATA MODEL (persisted as one JSON blob under storage key "board")
   DEFAULT_ITEM_TYPES. User manages it via "Manage items" — always
   render dropdowns from itemTypes, never hardcode options again.
 - nextNo: counter for the next DN-XXXX number.
-- drive: { clientId, fileId } — persisted so reconnecting doesn't need
-  re-entry.
+- users[]: { id, username, pin (SHA-256 hash, hashPin() — NOT plaintext,
+  see 2026-09-03 changelog), isRoot,
+  permissions: {addItems, removeItems, moveItems, manageNotes,
+  manageTypes, exportData, manageSync, manageUsers} }. Root ignores the
+  permissions object entirely (can() short-circuits to true).
+- drive: { clientId } — Drive OAuth client ID, persisted so reconnecting
+  for PDF archiving doesn't need re-entry. (fileId removed, see above.)
+- sync: { apiKey, binId } — jsonbin.io credentials for board data sync,
+  persisted so reconnecting doesn't need re-entry.
+
+USERS & PERMISSIONS
+- Client-side only, NOT real security — a PIN gate + hidden buttons to
+  stop normal staff clicking things they're not meant to, nothing more.
+  PINs are SHA-256 hashed (not plaintext) as of 2026-09-03, but this is
+  still not a real security boundary — anyone with devtools can bypass
+  it. Say this plainly if the user asks whether it's "secure" — don't
+  oversell it.
+- currentUserId (the active session) is device-local — stored via
+  storage.set('currentUserId', ...), NOT part of the synced board blob,
+  so each phone/laptop remembers its own logged-in user independently.
+- can(key) is the single gate function — checks root-bypass first, then
+  the permissions object. Called in TWO places for every gated action:
+  (a) applyPermissionsToUi() to hide/show buttons, and (b) a guard at
+  the top of the actual function (removeItem, markVinaged, etc.) — keep
+  both when adding new gated actions, the function guard is the one
+  that actually matters.
+- To add a new permission: add it to defaultPermissions() AND
+  PERMISSION_LABELS (controls the checkbox list in Manage Users) AND
+  wherever it should gate something (applyPermissionsToUi + the
+  function itself).
 
 KEY BUSINESS RULES (do not regress these without the user asking)
 1. isNoteComplete() = true iff the note has a SITE signature. Driver
@@ -72,7 +366,24 @@ KEY BUSINESS RULES (do not regress these without the user asking)
    name, driver signed date, site signed date. Never items, customer,
    or the signature images. Exists so old notes can be backfilled
    without reopening the whole note.
-4. Adding stock (Unfinished, Finished, dispatch cart lines, or ad-hoc
+   ROOT OVERRIDE (2026-09-02): root users are the one exception to the
+   whole lock. In viewNote(), `rootOverride = complete && current user
+   isRoot` — when true, the pending/editable branch renders instead of
+   the read-only docket branch (item add/remove, "Edit customer /
+   signature" via openEditNote, and a re-signable site-signature
+   canvas whose button reads "Update site signature" instead of
+   "...& lock"), plus the normally-read-only-view's Print/Email/
+   WhatsApp/Save-to-Drive buttons are added alongside so root doesn't
+   lose those. No banner or other indicator distinguishes this from the
+   normal pending-note edit view (removed per user request 2026-09-02)
+   — the only visible difference is the extra share/print/Drive buttons
+   and the site-signature button's label.
+   None of the underlying mutators (removeNoteItem, addFinishedItemToNote,
+   addAdhocItemToNote, confirmSiteSignature, openEditNote/saveEditedNote)
+   actually check isNoteComplete themselves — the lock was always a UI-only
+   gate in viewNote() — so no changes were needed there, only to which
+   branch of viewNote() root sees.
+4. Adding stock (Unfinished, Finished, delivery-note cart lines, or ad-hoc
    additions to a pending note) merges into an existing card with the
    same type + reference instead of duplicating — see
    findMergeTarget(). "Combine duplicates" does a one-time bulk merge
@@ -81,14 +392,34 @@ KEY BUSINESS RULES (do not regress these without the user asking)
 5. Removing a stock item (× on a card) prompts for a quantity rather
    than always deleting the whole card — see removeItem(). Finished
    removals are meant for damaged/written-off stock.
-6. Dispatch notes support MULTIPLE items per note via a cart
+6. Delivery notes support MULTIPLE items per note via a cart
    (dispatchCart — see addToDispatchCart / renderCartPanel). Finished
-   cards say "Add to dispatch note" to stage them; the Dispatched
+   cards say "Add to delivery note" to stage them; the Dispatched
    column's quick-add form stages ad-hoc lines the same way. "Review &
    sign" opens the driver-signature step for the whole cart at once.
 7. A new note can be created with NO signature via "Save for now"
    (submitDispatch(false)) — items still move to Dispatched, note just
    isn't signed yet.
+
+DOCKET ITEM LAYOUT
+- Each item line on the docket is 3 columns, in this order: item number
+  (#), Qty, Description — see itemLines / itemsHeader inside viewNote().
+  Don't reorder these or add a 4th visible column without the user
+  asking.
+- Per-item `ref` is NOT shown next to the description anymore (used to
+  be "Type — ref"). It's intentionally hidden from the docket and the
+  plain-text share summary (noteTextLines) — don't reintroduce it there.
+- In the "Delivery note" review modal (showDispatchModal), the Customer /
+  destination field is pre-filled from the cart items' ref value(s)
+  (dedup'd, joined) instead of showing ref next to each item — see
+  `cartRefs` / `defaultCustomer` in showDispatchModal(). Still editable
+  before submitting.
+
+DATE FORMAT
+- todayStr() spells the month out in full, e.g. "28 August 2026" (not
+  the abbreviated "28 Aug 2026"). Used everywhere a date is shown
+  (header dateline, docket date, signature dates) — keep it consistent
+  if touching date formatting again.
 
 SIGNATURE CAPTURE
 - Multiple independent pads can exist on screen at once (needed for the
@@ -145,7 +476,7 @@ WHEN THE USER UPLOADS THIS FILE AGAIN
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>Stock Board</title>
+<title>Dispatch</title>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -165,7 +496,10 @@ WHEN THE USER UPLOADS THIS FILE AGAIN
   body{background:var(--bg);color:var(--text);font-family:var(--font-b);margin:0;padding:28px 24px 60px;padding-bottom:calc(60px + env(safe-area-inset-bottom));}
   h1{font-family:var(--font-d);font-weight:700;font-size:34px;letter-spacing:.02em;margin:0;text-transform:uppercase;}
   .sub{font-family:var(--font-m);color:var(--faint);font-size:12px;letter-spacing:.08em;text-transform:uppercase;margin-top:4px;}
-  .topline{display:flex;justify-content:space-between;align-items:flex-end;border-bottom:2px solid var(--line);padding-bottom:16px;margin-bottom:22px;flex-wrap:wrap;gap:12px;}
+  .topline{margin-bottom:18px;}
+  .toolbar{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-bottom:22px;}
+  .topline h1{color:#F3EEDF;}
+  .topline .sub{color:#DCD5C0;}
   button{font-family:var(--font-b);cursor:pointer;}
   .btn{background:transparent;border:1px solid var(--line);color:var(--text);padding:8px 14px;border-radius:3px;font-size:13px;font-weight:500;transition:.15s;}
   .btn:hover{border-color:var(--amber);color:var(--amber);}
@@ -189,9 +523,11 @@ WHEN THE USER UPLOADS THIS FILE AGAIN
   @media(max-width:640px){
     body{padding:18px 14px 60px;padding-bottom:calc(60px + env(safe-area-inset-bottom));}
     h1{font-size:28px;}
-    .topline{flex-direction:column;align-items:flex-start;}
-    .topline > div:last-child{width:100%;display:flex;gap:8px;}
-    .topline > div:last-child .btn{flex:1;}
+    .header-card{flex-direction:column;align-items:flex-start;gap:14px;}
+    .header-card .lh-divider{display:none;}
+    .header-card .lh-logo{align-items:flex-start;}
+    .toolbar{flex-direction:column;}
+    .toolbar .btn{width:100%;}
     .addbar{flex-direction:column;align-items:stretch;}
     .addbar .field{width:100%;}
     select,input[type=text],input[type=number]{width:100%;font-size:16px;padding:10px;}
@@ -238,10 +574,16 @@ WHEN THE USER UPLOADS THIS FILE AGAIN
   .docket:before{content:"";position:absolute;top:0;left:22px;right:22px;border-top:2px dashed #B9AF93;}
   .docket-head{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #2A2519;padding-bottom:10px;margin-bottom:14px;}
   .docket-head h3{font-family:var(--font-d);font-size:26px;text-transform:uppercase;margin:0;letter-spacing:.02em;}
-  .docket-letterhead{margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid #B9AF93;}
-  .docket-letterhead .lh-name{font-family:var(--font-d);font-size:19px;font-weight:700;text-transform:uppercase;letter-spacing:.03em;color:#2A2519;}
-  .docket-letterhead .lh-addr{font-size:11.5px;color:#5A5238;margin-top:3px;}
-  .docket-letterhead .lh-reg{font-family:var(--font-m);font-size:10px;color:#8a8060;margin-top:5px;letter-spacing:.02em;}
+  .header-card{display:flex;align-items:center;justify-content:space-between;gap:18px;background:#78756E;color:#F3EEDF;border-radius:10px;padding:16px 20px;}
+  .header-card .lh-left{display:flex;flex-direction:column;gap:3px;min-width:0;}
+  .header-card .lh-name{font-family:var(--font-b);font-size:18px;font-weight:600;letter-spacing:.01em;color:#F3EEDF;}
+  .header-card .lh-reg{font-family:var(--font-m);font-size:10px;color:#DCD5C0;letter-spacing:.02em;margin-top:2px;}
+  .header-card .lh-addr{font-size:11.5px;color:#DCD5C0;margin-top:1px;}
+  .header-card .lh-divider{align-self:stretch;width:1px;background:rgba(243,238,223,.35);flex-shrink:0;}
+  .header-card .lh-logo{display:flex;flex-direction:column;align-items:flex-end;line-height:1;flex-shrink:0;}
+  .header-card .lh-logo .lh-oak{font-family:var(--font-b);font-weight:300;font-size:25px;letter-spacing:.3em;color:#F3EEDF;}
+  .header-card .lh-logo .lh-joinery{font-family:var(--font-b);font-weight:500;font-size:9.5px;letter-spacing:.38em;color:#F3EEDF;margin-top:5px;}
+  .docket-letterhead{margin-bottom:16px;}
   .docket-num{font-family:var(--font-m);font-size:12px;color:#5A5238;}
   .docket-date{font-family:var(--font-m);font-size:13px;border:1px solid #2A2519;border-radius:3px;padding:4px 9px;transform:rotate(-2deg);display:inline-block;}
   .docket{overflow:hidden;width:100%;}
@@ -249,9 +591,14 @@ WHEN THE USER UPLOADS THIS FILE AGAIN
   .docket-row span:first-child{flex-shrink:0;}
   .docket-row span:last-child{text-align:right;overflow-wrap:anywhere;}
   .docket-items{margin-top:14px;border-top:1px solid #B9AF93;padding-top:10px;}
-  .docket-item{display:flex;justify-content:space-between;gap:10px;font-size:13px;padding:5px 0;border-bottom:1px dotted #B9AF93;}
-  .docket-item span:first-child{flex:1;min-width:0;overflow-wrap:anywhere;}
-  .docket-item span:last-child{flex-shrink:0;white-space:nowrap;}
+  .docket-items-header{display:flex;align-items:center;gap:10px;font-size:10px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:#8a8060;padding-bottom:5px;border-bottom:1px solid #B9AF93;margin-bottom:2px;}
+  .docket-items-header .num-col{flex-shrink:0;width:20px;}
+  .docket-items-header .qty-col{flex-shrink:0;width:34px;text-align:center;}
+  .docket-items-header .desc-col{flex:1;min-width:0;}
+  .docket-item{display:flex;align-items:center;gap:10px;font-size:13px;padding:5px 0;border-bottom:1px dotted #B9AF93;}
+  .docket-item .num-col{flex-shrink:0;width:20px;color:#8a8060;}
+  .docket-item .qty-col{flex-shrink:0;width:34px;text-align:center;font-weight:600;border-left:1px solid #B9AF93;border-right:1px solid #B9AF93;}
+  .docket-item .desc-col{flex:1;min-width:0;overflow-wrap:anywhere;}
   .docket-item .spec{background:transparent;border:none;color:#5A5238;padding:2px 0 0;margin:0;}
   .docket-sig{margin-top:16px;padding-top:12px;border-top:1px solid #B9AF93;}
   .docket-sig img{display:block;max-width:220px;height:auto;}
@@ -272,7 +619,11 @@ WHEN THE USER UPLOADS THIS FILE AGAIN
   .cart-line .rm:hover{color:var(--rust);}
   .cart-panel .btn{width:100%;margin-top:8px;}
 
-  .note-item-row{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-bottom:1px dotted #B9AF93;}
+  .note-item-row{display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px dotted #B9AF93;}
+  .note-item-row .num-col{flex-shrink:0;width:20px;color:#8a8060;}
+  .note-item-row .qty-col{flex-shrink:0;width:34px;text-align:center;font-weight:600;border-left:1px solid #B9AF93;border-right:1px solid #B9AF93;}
+  .note-item-row .desc-col{flex:1;min-width:0;overflow-wrap:anywhere;}
+  .note-item-row .rm-col{flex-shrink:0;width:18px;text-align:right;}
   .note-item-row .rm{background:none;border:none;color:#8a8060;font-size:16px;line-height:1;cursor:pointer;padding:0 2px;}
   .note-item-row .rm:hover{color:var(--rust);}
   .add-item-row{display:flex;flex-direction:column;gap:6px;margin-top:10px;}
@@ -280,6 +631,26 @@ WHEN THE USER UPLOADS THIS FILE AGAIN
   .drive-dot.on{background:var(--green);}
   .drive-dot.syncing{background:var(--amber);}
   .drive-dot.err{background:var(--rust);}
+
+  .login-overlay{position:fixed;inset:0;background:var(--bg,#14110c);display:flex;align-items:center;justify-content:center;z-index:200;padding:20px;}
+  .login-card{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:28px;width:100%;max-width:360px;}
+  .login-card h3{font-family:var(--font-d);font-size:22px;text-transform:uppercase;margin:0 0 6px;}
+  .login-card .hint{font-size:12px;color:var(--muted);margin-bottom:18px;}
+  .user-pick-btn{display:block;width:100%;text-align:left;background:var(--panel-2);border:1px solid var(--line);color:var(--text);padding:12px 14px;border-radius:4px;font-size:14px;margin-bottom:8px;cursor:pointer;}
+  .user-pick-btn:hover{border-color:var(--amber);color:var(--amber);}
+  .user-badge{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);}
+  .user-badge b{color:var(--text);}
+  .user-badge button{background:none;border:none;color:var(--muted);text-decoration:underline;font-size:12px;cursor:pointer;padding:0;}
+  .user-badge button:hover{color:var(--amber);}
+  .perm-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px 14px;margin:14px 0;}
+  .perm-grid label{display:flex;align-items:center;gap:7px;font-size:13px;font-weight:400;}
+  .user-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 0;border-bottom:1px solid var(--line);}
+  .user-row .who{font-size:13px;}
+  .user-row .who .tag{font-size:10.5px;color:var(--amber);text-transform:uppercase;letter-spacing:.05em;margin-left:6px;}
+  .user-row .acts{display:flex;gap:8px;flex-shrink:0;}
+  .user-row .acts button{background:none;border:none;color:var(--muted);font-size:12px;text-decoration:underline;cursor:pointer;padding:0;}
+  .user-row .acts button:hover{color:var(--amber);}
+  .one-off-toggle{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:400;color:var(--muted);margin-top:5px;}
 
   @media print{
     body *{visibility:hidden;}
@@ -291,25 +662,40 @@ WHEN THE USER UPLOADS THIS FILE AGAIN
 </head>
 <body>
 
+<div id="loginOverlay"></div>
+
 <div class="topline">
-  <div>
-    <h1>Stock board</h1>
-    <div class="sub" id="dateline">—</div>
+  <div class="header-card">
+    <div class="lh-left">
+      <h1 style="font-size:22px;">Dispatch</h1>
+      <div class="sub" id="dateline">—</div>
+    </div>
+    <div class="lh-divider"></div>
+    <div class="lh-logo">
+      <span class="lh-oak">OAK</span>
+      <span class="lh-joinery">JOINERY</span>
+    </div>
   </div>
-  <div style="display:flex;gap:8px;">
-    <button class="btn drive-btn" id="driveBtn"><span class="drive-dot" id="driveDot"></span><span id="driveLabel">Google Drive</span></button>
-    <button class="btn" id="manageTypesBtn">Manage items</button>
-    <button class="btn" id="exportBtn">Download today's sheet</button>
-    <button class="btn" id="combineBtn">Combine duplicates</button>
-    <button class="btn" id="notesBtn">Dispatch notes (<span id="notesCount">0</span>)</button>
-  </div>
+  <div class="user-badge" id="userBadge" style="margin-top:8px;"></div>
 </div>
 
-<div class="addbar">
+<div class="toolbar">
+  <button class="btn drive-btn" id="syncBtn"><span class="drive-dot" id="cloudDot"></span><span id="cloudLabel">Sync across devices</span></button>
+  <button class="btn drive-btn" id="driveBtn"><span class="drive-dot" id="driveDot"></span><span id="driveLabel">Google Drive</span></button>
+  <button class="btn" id="manageTypesBtn">Manage items</button>
+  <button class="btn" id="exportBtn">Download today's sheet</button>
+  <button class="btn" id="combineBtn">Combine duplicates</button>
+  <button class="btn" id="notesBtn">Delivery notes (<span id="notesCount">0</span>)</button>
+  <button class="btn" id="manageUsersBtn">Manage users</button>
+</div>
+
+<div class="addbar" id="addbarMain">
   <div class="field">
     <label>Item</label>
-    <select id="typeSelect"></select>
+    <input type="text" id="typeCustomInput" list="itemTypesList" placeholder="Item description">
+    <label class="one-off-toggle"><input type="checkbox" id="typeCustomToggle"> Add to list</label>
   </div>
+  <datalist id="itemTypesList"></datalist>
   <div class="field">
     <label>Qty</label>
     <input type="number" id="qtyInput" value="1" min="1">
@@ -328,8 +714,9 @@ WHEN THE USER UPLOADS THIS FILE AGAIN
   </div>
   <div class="col vinaged">
     <div class="col-head"><h2>Finished</h2><span class="count" id="cnt-vinaged">0</span></div>
-    <div class="col-add">
-      <select id="typeSelectFin"></select>
+    <div class="col-add" id="addbarFin">
+      <input type="text" id="typeCustomInputFin" list="itemTypesList" placeholder="Item description">
+      <label class="one-off-toggle"><input type="checkbox" id="typeCustomToggleFin"> Add to list</label>
       <input type="number" id="qtyInputFin" value="1" min="1">
       <input type="text" id="refInputFin" value="NH Hotel">
       <button class="btn btn-green" id="addBtnFin">+ Add to finished</button>
@@ -338,12 +725,14 @@ WHEN THE USER UPLOADS THIS FILE AGAIN
   </div>
   <div class="col dispatched">
     <div class="col-head"><h2>Dispatched</h2><span class="count" id="cnt-dispatched">0</span></div>
+    <div id="archivedHint" style="font-size:11.5px;color:var(--muted);margin:-4px 0 8px;display:none;"></div>
     <div id="cartPanel"></div>
-    <div class="col-add">
-      <select id="typeSelectDis"></select>
+    <div class="col-add" id="addbarDis">
+      <input type="text" id="typeCustomInputDis" list="itemTypesList" placeholder="Item description">
+      <label class="one-off-toggle"><input type="checkbox" id="typeCustomToggleDis"> Add to list</label>
       <input type="number" id="qtyInputDis" value="1" min="1">
       <input type="text" id="refInputDis" value="NH Hotel">
-      <button class="btn btn-primary" id="addBtnDis">+ Add item to dispatch note</button>
+      <button class="btn btn-primary" id="addBtnDis">+ Add item to delivery note</button>
     </div>
     <div class="col-body" id="col-dispatched"></div>
   </div>
@@ -404,16 +793,80 @@ const DEFAULT_ITEM_TYPES = [
 let state = { items: [], notes: [] };
 let itemTypes = DEFAULT_ITEM_TYPES.slice();
 let nextNo = 1;
-let drive = { clientId: '', fileId: '', status: 'disconnected' }; // status: disconnected|connected|syncing|error
+let drive = { clientId: '', status: 'disconnected' }; // status: disconnected|connected|syncing|error — Drive is used ONLY for PDF archiving, see dev notes
 let driveAccessToken = null;
 let tokenClient = null;
-let driveSyncTimer = null;
+let cloudSync = { apiKey: '', binId: '' }; // jsonbin.io — board data sync, independent of Drive
+let cloudSyncStatus = 'disconnected'; // disconnected|syncing|connected|error
+let cloudSyncTimer = null;
+let cloudPollTimer = null;
+
+// Users & permissions — client-side only (not a real security boundary,
+// see dev notes). Root always has every permission regardless of the
+// permissions object.
+let users = []; // { id, username, pin, isRoot, permissions:{...} }
+let currentUserId = null;
+
+function defaultPermissions(){
+  return {
+    addItems: false,      // Add forms (Unfinished/Finished/Dispatched) + one-off items
+    removeItems: false,   // × delete button on cards
+    moveItems: false,     // Mark finished, Add to delivery note (stage into cart)
+    manageNotes: false,   // Delivery notes list, review & sign, edit signing details
+    manageTypes: false,   // Manage items (item catalog)
+    exportData: false,    // Download today's sheet, Combine duplicates
+    manageSync: false,    // Sync across devices + Google Drive settings
+    manageUsers: false    // Add/edit/remove users (root always has this)
+  };
+}
+
+function getCurrentUser(){
+  return users.find(u => u.id === currentUserId) || null;
+}
+
+function can(key){
+  const u = getCurrentUser();
+  if(!u) return false;
+  if(u.isRoot) return true;
+  return !!(u.permissions && u.permissions[key]);
+}
 
 function todayStr(){
   const d = new Date();
-  return d.toLocaleDateString('en-GB', {day:'2-digit', month:'short', year:'numeric'});
+  return d.toLocaleDateString('en-GB', {day:'2-digit', month:'long', year:'numeric'});
 }
 document.getElementById('dateline').textContent = todayStr();
+
+// HTML-escapes any user-supplied text (item descriptions, references,
+// usernames, delivery-note fields) before it's inserted via innerHTML,
+// to stop stored XSS — e.g. someone typing <img onerror=...> as an item
+// description or delivery note field. ALWAYS wrap user-typed strings in
+// this before interpolating into an innerHTML template. See dev notes.
+function escHtml(s){
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// PINs are stored as SHA-256 hashes, never plaintext — so reading the
+// synced jsonbin data (or the board's local storage) doesn't hand
+// someone every PIN in one go. Still not a real security boundary (a
+// short numeric PIN is crackable if someone gets the hash and really
+// wants it), but it's a meaningful step up from plaintext.
+async function hashPin(pin){
+  const enc = new TextEncoder().encode(pin);
+  const buf = await crypto.subtle.digest('SHA-256', enc);
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// Failed-PIN lockout — in-memory only (resets on page reload), just to
+// slow down someone sitting there guessing a 4-digit PIN repeatedly.
+const loginAttempts = {}; // userId -> { count, lockedUntil }
+const MAX_LOGIN_ATTEMPTS = 5;
+const LOCKOUT_MS = 30000;
 
 function isoDate(){
   const d = new Date();
@@ -421,13 +874,14 @@ function isoDate(){
 }
 
 function exportDaySheet(auto){
+  if(!can('exportData')) return;
   const today = todayStr();
   const todaysNotes = state.notes.filter(n => n.date === today);
   if(todaysNotes.length === 0){
     if(!auto) alert('No dispatches logged today yet.');
     return;
   }
-  const rows = [['Dispatch note','Date','Customer','Item','Reference','Qty','Signed']];
+  const rows = [['Delivery note','Date','Customer','Item','Reference','Qty','Signed']];
   todaysNotes.forEach(n => {
     n.items.forEach(it => {
       rows.push([n.number, n.date, n.customer, it.type, it.ref || '', it.qty, isNoteComplete(n) ? 'Yes' : 'No']);
@@ -466,9 +920,13 @@ async function load(){
       state.notes = parsed.notes || [];
       nextNo = parsed.nextNo || (state.notes.length + 1);
       itemTypes = (parsed.itemTypes && parsed.itemTypes.length) ? parsed.itemTypes : DEFAULT_ITEM_TYPES.slice();
+      users = parsed.users || [];
       if(parsed.drive){
         drive.clientId = parsed.drive.clientId || '';
-        drive.fileId = parsed.drive.fileId || '';
+      }
+      if(parsed.sync){
+        cloudSync.apiKey = parsed.sync.apiKey || '';
+        cloudSync.binId = parsed.sync.binId || '';
       }
     }
   }catch(e){ }
@@ -476,36 +934,40 @@ async function load(){
   render();
   updateDriveUi();
   if(drive.clientId) tryAutoReconnectDrive();
+
+  updateSyncUi();
+  if(cloudSync.apiKey && cloudSync.binId){
+    await pullFromCloud(true);
+    startCloudPolling();
+  }
+
+  await checkLogin();
 }
 
 async function save(){
   try{
-    await storage.set('board', JSON.stringify({items: state.items, notes: state.notes, nextNo, itemTypes, drive: {clientId: drive.clientId, fileId: drive.fileId}}), false);
+    await storage.set('board', JSON.stringify({items: state.items, notes: state.notes, nextNo, itemTypes, users, drive: {clientId: drive.clientId}, sync: {apiKey: cloudSync.apiKey, binId: cloudSync.binId}}), false);
   }catch(e){ console.error('storage failed', e); }
-  queueDriveSync();
+  queueCloudSync();
 }
 
 function renderTypeSelects(){
-  const optionsHtml = itemTypes.map(t => `<option value="${t.replace(/"/g,'&quot;')}">${t}</option>`).join('');
-  ['typeSelect', 'typeSelectFin', 'typeSelectDis'].forEach(id => {
-    const el = document.getElementById(id);
-    if(!el) return;
-    const prev = el.value;
-    el.innerHTML = optionsHtml;
-    if(itemTypes.includes(prev)) el.value = prev;
-  });
+  const optionsHtml = itemTypes.map(t => `<option value="${escHtml(t)}">${escHtml(t)}</option>`).join('');
+  const list = document.getElementById('itemTypesList');
+  if(list) list.innerHTML = optionsHtml;
 }
 
 document.getElementById('manageTypesBtn').addEventListener('click', openManageTypes);
 
 function openManageTypes(){
+  if(!can('manageTypes')) return;
   const layer = document.getElementById('modalLayer');
   layer.innerHTML = `<div class="modal-bg" id="typesBg">
     <div class="modal" style="max-width:420px;">
       <h3>Manage items</h3>
       <div class="hint">Add or remove item types from the dropdowns. Removing one doesn't affect stock already on the board.</div>
       <div style="max-height:280px;overflow:auto;display:flex;flex-direction:column;gap:4px;margin-bottom:14px;">
-        ${itemTypes.map(t => `<div class="note-item-row" style="border-bottom:1px solid var(--line);"><span>${t}</span><button class="rm" onclick="removeItemType('${t.replace(/'/g,"\\'")}')" title="Remove">&times;</button></div>`).join('')}
+        ${itemTypes.map((t, i) => `<div class="note-item-row" style="border-bottom:1px solid var(--line);"><span>${escHtml(t)}</span><button class="rm" onclick="removeItemTypeAt(${i})" title="Remove">&times;</button></div>`).join('')}
       </div>
       <div class="field">
         <label>New item name</label>
@@ -540,8 +1002,8 @@ function addItemType(){
   openManageTypes();
 }
 
-function removeItemType(name){
-  itemTypes = itemTypes.filter(t => t !== name);
+function removeItemTypeAt(index){
+  itemTypes.splice(index, 1);
   save();
   renderTypeSelects();
   openManageTypes();
@@ -555,12 +1017,32 @@ function specHtml(type){
 
 function render(){
   const cols = {unvinaged:[], vinaged:[], dispatched:[]};
-  state.items.forEach(it => cols[it.status].push(it));
+  let archivedCount = 0;
+  state.items.forEach(it => {
+    if(it.status === 'dispatched'){
+      const note = state.notes.find(n => n.id === it.noteId);
+      if(note && isNoteComplete(note)){
+        archivedCount++;
+        return; // fully signed off — hidden from the board, still viewable via "Delivery notes"
+      }
+    }
+    cols[it.status].push(it);
+  });
 
   document.getElementById('cnt-unvinaged').textContent = cols.unvinaged.length;
   document.getElementById('cnt-vinaged').textContent = cols.vinaged.length;
   document.getElementById('cnt-dispatched').textContent = cols.dispatched.length;
   document.getElementById('notesCount').textContent = state.notes.length;
+
+  const hintEl = document.getElementById('archivedHint');
+  if(hintEl){
+    if(archivedCount > 0){
+      hintEl.textContent = `${archivedCount} completed deliver${archivedCount === 1 ? 'y' : 'ies'} — signed off and hidden here, view under "Delivery notes"`;
+      hintEl.style.display = 'block';
+    } else {
+      hintEl.style.display = 'none';
+    }
+  }
 
   renderCol('unvinaged', cols.unvinaged);
   renderCol('vinaged', cols.vinaged);
@@ -576,9 +1058,9 @@ function renderCartPanel(){
     return;
   }
   el.innerHTML = `<div class="cart-panel">
-    <div class="cart-title">Dispatch note in progress — ${dispatchCart.length} item${dispatchCart.length > 1 ? 's' : ''}</div>
-    ${dispatchCart.map(c => `<div class="cart-line"><span>${c.type}${c.ref ? ' — ' + c.ref : ''} x${c.qty}</span><button class="rm" onclick="removeFromCart('${c.tempId}')" title="Remove">&times;</button></div>`).join('')}
-    <button class="btn btn-primary btn-sm" onclick="startDispatchFromCart()">Review &amp; sign (${dispatchCart.length})</button>
+    <div class="cart-title">Delivery note in progress — ${dispatchCart.length} item${dispatchCart.length > 1 ? 's' : ''}</div>
+    ${dispatchCart.map(c => `<div class="cart-line"><span>${escHtml(c.type)}${c.ref ? ' — ' + escHtml(c.ref) : ''} x${c.qty}</span>${can('moveItems') ? `<button class="rm" onclick="removeFromCart('${c.tempId}')" title="Remove">&times;</button>` : ''}</div>`).join('')}
+    ${can('manageNotes') ? `<button class="btn btn-primary btn-sm" onclick="startDispatchFromCart()">Review &amp; sign (${dispatchCart.length})</button>` : ''}
   </div>`;
 }
 
@@ -588,7 +1070,8 @@ function renderCol(status, list){
     el.innerHTML = '<div class="empty">No stock here</div>';
     return;
   }
-  el.innerHTML = list.slice().reverse().map(it => cardHtml(it, status)).join('');
+  const sorted = list.slice().sort((a, b) => a.type.localeCompare(b.type, undefined, {sensitivity: 'base'}));
+  el.innerHTML = sorted.map(it => cardHtml(it, status)).join('');
 }
 
 function isNoteComplete(note){
@@ -599,30 +1082,37 @@ function cardHtml(it, status){
   let actions = '';
   let dates = `<span>Added ${it.addedDate}</span>`;
   if(status === 'unvinaged'){
-    actions = `<button class="btn btn-green btn-sm" onclick="markVinaged('${it.id}')">Mark finished</button>`;
+    actions = can('moveItems') ? `<button class="btn btn-green btn-sm" onclick="markVinaged('${it.id}')">Mark finished</button>` : '';
   } else if(status === 'vinaged'){
     dates += `<span>Finished ${it.vinagedDate}</span>`;
     const inCart = dispatchCart.some(c => c.stockItemId === it.id);
-    actions = inCart
-      ? `<button class="btn btn-sm" disabled style="opacity:.5;">In dispatch note</button>`
-      : `<button class="btn btn-primary btn-sm" onclick="addToDispatchCart('${it.id}')">Add to dispatch note</button>`;
+    if(!can('moveItems')){
+      actions = '';
+    } else {
+      actions = inCart
+        ? `<button class="btn btn-sm" disabled style="opacity:.5;">In delivery note</button>`
+        : `<button class="btn btn-primary btn-sm" onclick="addToDispatchCart('${it.id}')">Add to delivery note</button>`;
+    }
   } else {
     dates += `<span>Finished ${it.vinagedDate}</span><span>Dispatched ${it.dispatchedDate}</span>`;
     const note = state.notes.find(n => n.id === it.noteId);
     const complete = note ? isNoteComplete(note) : true;
-    actions = complete
-      ? `<button class="btn btn-sm" onclick="viewNote('${it.noteId}')">View dispatch note</button>`
-      : `<button class="btn btn-primary btn-sm" onclick="viewNote('${it.noteId}')">Complete signature</button>`;
+    actions = can('manageNotes')
+      ? (complete
+        ? `<button class="btn btn-sm" onclick="viewNote('${it.noteId}')">View delivery note</button>`
+        : `<button class="btn btn-primary btn-sm" onclick="viewNote('${it.noteId}')">Complete signature</button>`)
+      : '';
   }
+  const canRemoveHere = can('removeItems') && (status==='unvinaged' || (status==='vinaged' && !dispatchCart.some(c => c.stockItemId === it.id)));
   return `<div class="card">
     <div class="card-top">
       <div>
-        <div class="card-type">${it.type}</div>
-        ${it.ref ? `<div class="card-ref">${it.ref}</div>` : ''}
+        <div class="card-type">${escHtml(it.type)}</div>
+        ${it.ref ? `<div class="card-ref">${escHtml(it.ref)}</div>` : ''}
       </div>
       <div style="display:flex;align-items:center;gap:8px;">
         <span class="card-qty">x${it.qty}</span>
-        ${(status==='unvinaged' || (status==='vinaged' && !dispatchCart.some(c => c.stockItemId === it.id))) ? `<button class="del" title="Remove" onclick="removeItem('${it.id}')">&times;</button>` : ''}
+        ${canRemoveHere ? `<button class="del" title="Remove" onclick="removeItem('${it.id}')">&times;</button>` : ''}
       </div>
     </div>
     ${specHtml(it.type)}
@@ -636,6 +1126,7 @@ function findMergeTarget(status, type, ref){
 }
 
 function combineDuplicates(){
+  if(!can('exportData')) return;
   let mergedCount = 0;
   ['unvinaged', 'vinaged'].forEach(status => {
     const groups = {};
@@ -660,7 +1151,14 @@ function combineDuplicates(){
 document.getElementById('combineBtn').addEventListener('click', combineDuplicates);
 
 document.getElementById('addBtn').addEventListener('click', () => {
-  const type = document.getElementById('typeSelect').value;
+  if(!can('addItems')) return;
+  const type = document.getElementById('typeCustomInput').value.trim();
+  if(!type){ alert('Enter a description for the item.'); return; }
+  const addToList = document.getElementById('typeCustomToggle').checked;
+  if(addToList && !itemTypes.includes(type)){
+    itemTypes.push(type);
+    renderTypeSelects();
+  }
   const qty = Math.max(1, parseInt(document.getElementById('qtyInput').value) || 1);
   const ref = document.getElementById('refInput').value.trim();
   const existing = findMergeTarget('unvinaged', type, ref);
@@ -678,6 +1176,8 @@ document.getElementById('addBtn').addEventListener('click', () => {
   }
   document.getElementById('refInput').value = 'NH Hotel';
   document.getElementById('qtyInput').value = 1;
+  document.getElementById('typeCustomInput').value = '';
+  document.getElementById('typeCustomToggle').checked = false;
   save(); render();
 });
 
@@ -701,7 +1201,14 @@ function consumeFromStatus(status, type, qty){
 }
 
 document.getElementById('addBtnFin').addEventListener('click', () => {
-  const type = document.getElementById('typeSelectFin').value;
+  if(!can('addItems')) return;
+  const type = document.getElementById('typeCustomInputFin').value.trim();
+  if(!type){ alert('Enter a description for the item.'); return; }
+  const addToList = document.getElementById('typeCustomToggleFin').checked;
+  if(addToList && !itemTypes.includes(type)){
+    itemTypes.push(type);
+    renderTypeSelects();
+  }
   const qty = Math.max(1, parseInt(document.getElementById('qtyInputFin').value) || 1);
   const ref = document.getElementById('refInputFin').value.trim();
   const today = todayStr();
@@ -721,11 +1228,21 @@ document.getElementById('addBtnFin').addEventListener('click', () => {
   }
   document.getElementById('refInputFin').value = 'NH Hotel';
   document.getElementById('qtyInputFin').value = 1;
+  document.getElementById('typeCustomInputFin').value = '';
+  document.getElementById('typeCustomToggleFin').checked = false;
   save(); render();
 });
 
 document.getElementById('addBtnDis').addEventListener('click', () => {
-  const type = document.getElementById('typeSelectDis').value;
+  if(!can('addItems')) return;
+  const type = document.getElementById('typeCustomInputDis').value.trim();
+  if(!type){ alert('Enter a description for the item.'); return; }
+  const addToList = document.getElementById('typeCustomToggleDis').checked;
+  if(addToList && !itemTypes.includes(type)){
+    itemTypes.push(type);
+    renderTypeSelects();
+    save();
+  }
   const qty = Math.max(1, parseInt(document.getElementById('qtyInputDis').value) || 1);
   const ref = document.getElementById('refInputDis').value.trim();
   const existing = dispatchCart.find(c => c.stockItemId === null && c.type === type && (c.ref || '') === (ref || ''));
@@ -736,10 +1253,13 @@ document.getElementById('addBtnDis').addEventListener('click', () => {
   }
   document.getElementById('refInputDis').value = 'NH Hotel';
   document.getElementById('qtyInputDis').value = 1;
+  document.getElementById('typeCustomInputDis').value = '';
+  document.getElementById('typeCustomToggleDis').checked = false;
   render();
 });
 
 function addToDispatchCart(stockItemId){
+  if(!can('moveItems')) return;
   const it = state.items.find(x => x.id === stockItemId);
   if(!it) return;
   if(dispatchCart.some(c => c.stockItemId === stockItemId)) return;
@@ -753,6 +1273,7 @@ function removeFromCart(tempId){
 }
 
 function markVinaged(id){
+  if(!can('moveItems')) return;
   const it = state.items.find(x => x.id === id);
   if(!it) return;
   it.status = 'vinaged';
@@ -761,6 +1282,7 @@ function markVinaged(id){
 }
 
 function removeItem(id){
+  if(!can('removeItems')) return;
   const it = state.items.find(x => x.id === id);
   if(!it) return;
   const label = `${it.type}${it.ref ? ' (' + it.ref + ')' : ''}`;
@@ -788,21 +1310,24 @@ let dispatchCart = [];
 let sigPads = {}; // canvasId -> { ctx, hasContent, drawing, lastX, lastY }
 
 function startDispatchFromCart(){
+  if(!can('manageNotes')) return;
   if(dispatchCart.length === 0) return;
   showDispatchModal();
 }
 
 function showDispatchModal(){
   const layer = document.getElementById('modalLayer');
-  const itemsHtml = dispatchCart.map(c => `<div class="note-item-row"><span>${c.type}${c.ref ? ' — ' + c.ref : ''} x${c.qty}</span></div>`).join('');
+  const itemsHtml = dispatchCart.map(c => `<div class="note-item-row"><span>${escHtml(c.type)} x${c.qty}</span></div>`).join('');
+  const cartRefs = [...new Set(dispatchCart.map(c => c.ref).filter(Boolean))];
+  const defaultCustomer = cartRefs.join(', ');
   layer.innerHTML = `<div class="modal-bg" id="dispBg">
     <div class="modal">
-      <h3>Dispatch</h3>
+      <h3>Delivery note</h3>
       <div class="hint">${dispatchCart.length} item${dispatchCart.length > 1 ? 's' : ''} on this note</div>
       <div style="margin-bottom:10px;">${itemsHtml}</div>
       <div class="field">
         <label>Customer / destination</label>
-        <input type="text" id="custInput" placeholder="e.g. Acme Motorhomes" style="width:100%;">
+        <input type="text" id="custInput" placeholder="e.g. Acme Motorhomes" style="width:100%;" value="${defaultCustomer.replace(/"/g,'&quot;')}">
       </div>
       <div class="field" style="margin-top:12px;">
         <label>Driver name</label>
@@ -974,54 +1499,68 @@ function submitDispatch(requireDriverSig){
 }
 
 function viewNote(noteId){
+  if(!can('manageNotes')) return;
   const note = state.notes.find(n => n.id === noteId);
   if(!note) return;
   const complete = isNoteComplete(note);
+  const curUser = getCurrentUser();
+  const rootOverride = complete && !!(curUser && curUser.isRoot);
   const layer = document.getElementById('modalLayer');
 
   const driverInfoLine = (note.driverName || note.vehicleReg)
-    ? `${note.driverName || ''}${note.driverName && note.vehicleReg ? ' · ' : ''}${note.vehicleReg ? 'Vehicle: ' + note.vehicleReg : ''}`
+    ? `${escHtml(note.driverName || '')}${note.driverName && note.vehicleReg ? ' · ' : ''}${note.vehicleReg ? 'Vehicle: ' + escHtml(note.vehicleReg) : ''}`
     : '';
   const driverBlock = note.driverSignature
     ? `<div class="docket-sig"><img src="${note.driverSignature}" alt="Driver signature"><div class="sig-label">Dispatched &amp; signed by driver${driverInfoLine ? ' — ' + driverInfoLine : ''}${note.driverSignedDate ? ' — ' + note.driverSignedDate : ''}</div></div>`
-    : (note.signature ? `<div class="docket-sig"><img src="${note.signature}" alt="Signature"><div class="sig-label">Received &amp; signed by ${note.customer}${note.date ? ' — ' + note.date : ''}</div></div>` : '');
+    : (note.signature ? `<div class="docket-sig"><img src="${note.signature}" alt="Signature"><div class="sig-label">Received &amp; signed by ${escHtml(note.customer)}${note.date ? ' — ' + escHtml(note.date) : ''}</div></div>` : '');
   const siteBlock = note.siteSignature
-    ? `<div class="docket-sig"><img src="${note.siteSignature}" alt="Site signature"><div class="sig-label">Received &amp; signed by ${note.siteSignedBy || note.customer}${note.siteSignedDate ? ' — ' + note.siteSignedDate : ''}</div></div>`
+    ? `<div class="docket-sig"><img src="${note.siteSignature}" alt="Site signature"><div class="sig-label">Received &amp; signed by ${escHtml(note.siteSignedBy || note.customer)}${note.siteSignedDate ? ' — ' + escHtml(note.siteSignedDate) : ''}</div></div>`
     : '';
   const driverInfoRow = (driverInfoLine && !note.driverSignature)
     ? `<div class="docket-row"><span>Driver</span><span>${driverInfoLine}</span></div>`
     : '';
 
-  const itemLines = note.items.map(x => {
-    const removeBtn = (!complete && note.items.length > 1)
+  const editableItems = !complete || rootOverride;
+  const itemLines = note.items.map((x, i) => {
+    const removeBtn = (editableItems && note.items.length > 1)
       ? `<button class="rm" onclick="removeNoteItem('${note.id}','${x.stockItemId}')" title="Remove">&times;</button>`
       : '';
-    return `<div class="${complete ? 'docket-item' : 'note-item-row'}"><span>${x.type}${x.ref ? ' — ' + x.ref : ''}</span><span style="display:flex;align-items:center;gap:6px;">x${x.qty}${removeBtn}</span></div>`;
+    const rmCol = editableItems ? `<span class="rm-col">${removeBtn}</span>` : '';
+    return `<div class="${editableItems ? 'note-item-row' : 'docket-item'}"><span class="num-col">${i + 1}</span><span class="qty-col">${x.qty}</span><span class="desc-col">${x.type}</span>${rmCol}</div>`;
   }).join('');
+  const itemsHeader = `<div class="docket-items-header"><span class="num-col">#</span><span class="qty-col">Qty</span><span class="desc-col">Description</span></div>`;
 
   const docketHtml = `<div class="docket" id="printArea">
-        <div class="docket-letterhead">
-          <div class="lh-name">Oak Joinery (Pty) Ltd</div>
-          <div class="lh-addr">16 Bowling Avenue, Kramerville, Johannesburg</div>
-          <div class="lh-reg">Reg No: 2022/532088/07 &middot; VAT No: 4390291278</div>
+        <div class="docket-letterhead header-card">
+          <div class="lh-left">
+            <div class="lh-name">Oak Joinery (Pty) Ltd</div>
+            <div class="lh-addr">16 Bowling Avenue, Kramerville, Johannesburg</div>
+            <div class="lh-reg">VAT No: 4390291278<br>Reg No: 2022/532088/07</div>
+          </div>
+          <div class="lh-divider"></div>
+          <div class="lh-logo">
+            <span class="lh-oak">OAK</span>
+            <span class="lh-joinery">JOINERY</span>
+          </div>
         </div>
         <div class="docket-head">
           <div>
-            <h3>Dispatch note</h3>
+            <h3>Delivery note</h3>
             <div class="docket-num">${note.number}</div>
           </div>
           <div class="docket-date">${note.date}</div>
         </div>
-        <div class="docket-row"><span>To</span><span>${note.customer}</span></div>
+        <div class="docket-row"><span>To</span><span>${escHtml(note.customer)}</span></div>
         ${driverInfoRow}
         <div class="docket-items">
+          ${itemsHeader}
           ${itemLines}
         </div>
         ${driverBlock}
         ${siteBlock}
       </div>`;
 
-  if(complete){
+  if(complete && !rootOverride){
     layer.innerHTML = `<div class="modal-bg" id="noteBg">
       <div class="modal" style="max-width:480px;padding:0;background:transparent;border:none;">
         ${docketHtml}
@@ -1039,7 +1578,7 @@ function viewNote(noteId){
   }
 
   const finishedOptions = state.items.filter(it => it.status === 'vinaged').map(it =>
-    `<option value="${it.id}">${it.type}${it.ref ? ' — ' + it.ref : ''} (x${it.qty})</option>`
+    `<option value="${it.id}">${escHtml(it.type)}${it.ref ? ' — ' + escHtml(it.ref) : ''} (x${it.qty})</option>`
   ).join('');
 
   layer.innerHTML = `<div class="modal-bg" id="noteBg">
@@ -1058,21 +1597,21 @@ function viewNote(noteId){
       <div class="add-item-row">
         <label class="sig-hint" style="margin-bottom:2px;">Or add an ad-hoc item</label>
         <select id="addAdhocType">
-          ${itemTypes.map(t => `<option value="${t.replace(/"/g,'&quot;')}">${t}</option>`).join('')}
+          ${itemTypes.map(t => `<option value="${escHtml(t)}">${escHtml(t)}</option>`).join('')}
         </select>
         <input type="number" id="addAdhocQty" value="1" min="1">
-        <input type="text" id="addAdhocRef" value="${note.customer.replace(/"/g,'&quot;')}">
+        <input type="text" id="addAdhocRef" value="${escHtml(note.customer)}">
         <button type="button" class="btn btn-sm" onclick="addAdhocItemToNote('${note.id}')">Add ad-hoc item</button>
       </div>
 
       ${!note.driverSignature ? `
       <div class="field" style="margin-top:14px;">
         <label>Driver name</label>
-        <input type="text" id="pendingDriverName" placeholder="e.g. Thabo M." style="width:100%;" value="${(note.driverName || '').replace(/"/g,'&quot;')}">
+        <input type="text" id="pendingDriverName" placeholder="e.g. Thabo M." style="width:100%;" value="${escHtml(note.driverName || '')}">
       </div>
       <div class="field" style="margin-top:8px;">
         <label>Vehicle registration</label>
-        <input type="text" id="pendingVehicleReg" placeholder="e.g. CA 123-456" style="width:100%;" value="${(note.vehicleReg || '').replace(/"/g,'&quot;')}">
+        <input type="text" id="pendingVehicleReg" placeholder="e.g. CA 123-456" style="width:100%;" value="${escHtml(note.vehicleReg || '')}">
       </div>
       <div class="field" style="margin-top:8px;">
         <label>Driver signature</label>
@@ -1090,10 +1629,10 @@ function viewNote(noteId){
 
       <div class="field" style="margin-top:14px;">
         <label>Site signature</label>
-        <input type="text" id="siteSignerName" placeholder="Name of person signing" style="width:100%;margin-bottom:8px;" value="${(note.siteSignedBy || '').replace(/"/g,'&quot;')}">
+        <input type="text" id="siteSignerName" placeholder="Name of person signing" style="width:100%;margin-bottom:8px;" value="${escHtml(note.siteSignedBy || '')}">
         <div class="sigwrap"><canvas id="siteSigCanvas"></canvas></div>
         <div class="sig-actions">
-          <span class="sig-hint">Site contact signs to confirm receipt — locks this note</span>
+          <span class="sig-hint">${rootOverride ? 'Redrawing this replaces the site signature on the locked note' : 'Site contact signs to confirm receipt — locks this note'}</span>
           <button type="button" class="btn btn-sm" onclick="clearSignature('siteSigCanvas')">Clear</button>
         </div>
       </div>
@@ -1102,7 +1641,12 @@ function viewNote(noteId){
         <button class="btn" onclick="closeModal()">Close for now</button>
         <button class="btn" onclick="openEditNote('${note.id}')">Edit customer / signature</button>
         <button class="btn" onclick="openSigningDetails('${note.id}')">Edit signing details</button>
-        <button class="btn btn-primary" onclick="confirmSiteSignature('${note.id}')">Submit site signature &amp; lock</button>
+        <button class="btn btn-primary" onclick="confirmSiteSignature('${note.id}')">${rootOverride ? 'Update site signature' : 'Submit site signature &amp; lock'}</button>
+        ${rootOverride ? `
+        <button class="btn" onclick="window.print()">Print</button>
+        <button class="btn" onclick="shareEmail('${note.id}')">Email</button>
+        <button class="btn btn-green" onclick="shareWhatsApp('${note.id}')">WhatsApp</button>
+        <button class="btn" onclick="manualSaveRecord('${note.id}')">${note.driveFileId ? 'Re-save to Drive' : 'Save to Drive'}</button>` : ''}
       </div>
     </div>
   </div>`;
@@ -1139,23 +1683,23 @@ function openSigningDetails(noteId){
       <div class="hint">${note.number} — doesn't touch items or the signature images</div>
       <div class="field">
         <label>Driver name</label>
-        <input type="text" id="sdDriverName" style="width:100%;" value="${(note.driverName || '').replace(/"/g,'&quot;')}">
+        <input type="text" id="sdDriverName" style="width:100%;" value="${escHtml(note.driverName || '')}">
       </div>
       <div class="field" style="margin-top:12px;">
         <label>Vehicle registration</label>
-        <input type="text" id="sdVehicleReg" style="width:100%;" value="${(note.vehicleReg || '').replace(/"/g,'&quot;')}">
+        <input type="text" id="sdVehicleReg" style="width:100%;" value="${escHtml(note.vehicleReg || '')}">
       </div>
       <div class="field" style="margin-top:12px;">
         <label>Site signer name</label>
-        <input type="text" id="sdSignerName" style="width:100%;" value="${(note.siteSignedBy || '').replace(/"/g,'&quot;')}">
+        <input type="text" id="sdSignerName" style="width:100%;" value="${escHtml(note.siteSignedBy || '')}">
       </div>
       <div class="field" style="margin-top:12px;">
         <label>Driver signed date</label>
-        <input type="text" id="sdDriverDate" placeholder="e.g. 18 Aug 2026" style="width:100%;" value="${(note.driverSignedDate || '').replace(/"/g,'&quot;')}">
+        <input type="text" id="sdDriverDate" placeholder="e.g. 18 Aug 2026" style="width:100%;" value="${escHtml(note.driverSignedDate || '')}">
       </div>
       <div class="field" style="margin-top:12px;">
         <label>Site signed date</label>
-        <input type="text" id="sdSiteDate" placeholder="e.g. 18 Aug 2026" style="width:100%;" value="${(note.siteSignedDate || '').replace(/"/g,'&quot;')}">
+        <input type="text" id="sdSiteDate" placeholder="e.g. 18 Aug 2026" style="width:100%;" value="${escHtml(note.siteSignedDate || '')}">
       </div>
       <div class="modal-actions">
         <button class="btn" onclick="viewNote('${note.id}')">Cancel</button>
@@ -1183,7 +1727,7 @@ function removeNoteItem(noteId, stockItemId){
   const note = state.notes.find(n => n.id === noteId);
   if(!note) return;
   if(note.items.length <= 1){
-    alert('A dispatch note needs at least one item. Close this note and add items back to Finished stock manually if you dispatched by mistake.');
+    alert('A delivery note needs at least one item. Close this note and add items back to Finished stock manually if you dispatched by mistake.');
     return;
   }
   const stockItem = state.items.find(it => it.id === stockItemId);
@@ -1275,11 +1819,11 @@ function openEditNote(noteId){
   const layer = document.getElementById('modalLayer');
   layer.innerHTML = `<div class="modal-bg" id="editBg">
     <div class="modal" style="max-width:480px;">
-      <h3>Edit dispatch note</h3>
+      <h3>Edit delivery note</h3>
       <div class="hint">${note.number}</div>
       <div class="field">
         <label>Customer / destination</label>
-        <input type="text" id="editCustInput" style="width:100%;" value="${note.customer.replace(/"/g,'&quot;')}">
+        <input type="text" id="editCustInput" style="width:100%;" value="${escHtml(note.customer)}">
       </div>
 
       <div class="field" style="margin-top:14px;">
@@ -1300,7 +1844,7 @@ function openEditNote(noteId){
       </div>
       <div class="field" style="margin-top:8px;">
         <label>Signed by</label>
-        <input type="text" id="editSiteSignerName" placeholder="Name of person signing" style="width:100%;" value="${(note.siteSignedBy || '').replace(/"/g,'&quot;')}">
+        <input type="text" id="editSiteSignerName" placeholder="Name of person signing" style="width:100%;" value="${escHtml(note.siteSignedBy || '')}">
       </div>
       <div class="field" style="margin-top:8px;">
         <div class="sigwrap"><canvas id="editSiteSig"></canvas></div>
@@ -1359,12 +1903,12 @@ async function generateDocketImage(note){
 
 function noteTextLines(note){
   return [
-    `Dispatch note ${note.number}`,
+    `Delivery note ${note.number}`,
     `Date: ${note.date}`,
     `To: ${note.customer}`,
     isNoteComplete(note) ? 'Signed: Yes' : 'Signed: No',
     '',
-    ...note.items.map(x => `- ${x.type}${x.ref ? ' (' + x.ref + ')' : ''} x${x.qty}`)
+    ...note.items.map((x, i) => `${i + 1}. x${x.qty} ${x.type}`)
   ];
 }
 
@@ -1376,7 +1920,7 @@ async function shareWhatsApp(noteId){
     const file = await generateDocketImage(note);
     if(file && (!navigator.canShare || navigator.canShare({ files: [file] }))){
       try{
-        await navigator.share({ files: [file], title: `Dispatch note ${note.number}`, text: `Dispatch note ${note.number} — ${note.customer}` });
+        await navigator.share({ files: [file], title: `Delivery note ${note.number}`, text: `Delivery note ${note.number} — ${note.customer}` });
         return;
       }catch(e){
         if(e && e.name === 'AbortError') return;
@@ -1397,7 +1941,7 @@ async function shareEmail(noteId){
     const file = await generateDocketImage(note);
     if(file && (!navigator.canShare || navigator.canShare({ files: [file] }))){
       try{
-        await navigator.share({ files: [file], title: `Dispatch note ${note.number}`, text: `Dispatch note ${note.number} — ${note.customer}` });
+        await navigator.share({ files: [file], title: `Delivery note ${note.number}`, text: `Delivery note ${note.number} — ${note.customer}` });
         return;
       }catch(e){
         if(e && e.name === 'AbortError') return;
@@ -1406,19 +1950,20 @@ async function shareEmail(noteId){
     }
   }
 
-  const subject = `Dispatch note ${note.number}`;
+  const subject = `Delivery note ${note.number}`;
   const body = noteTextLines(note).join('\n');
   window.location.href = 'mailto:?subject=' + encodeURIComponent(subject) + '&body=' + encodeURIComponent(body);
 }
 
 function viewAllNotes(){
+  if(!can('manageNotes')) return;
   const layer = document.getElementById('modalLayer');
   if(state.notes.length === 0){
-    layer.innerHTML = `<div class="modal-bg" id="allBg"><div class="modal"><h3>Dispatch notes</h3><div class="hint">None created yet</div><div class="modal-actions"><button class="btn" onclick="closeModal()">Close</button></div></div></div>`;
+    layer.innerHTML = `<div class="modal-bg" id="allBg"><div class="modal"><h3>Delivery notes</h3><div class="hint">None created yet</div><div class="modal-actions"><button class="btn" onclick="closeModal()">Close</button></div></div></div>`;
     return;
   }
   layer.innerHTML = `<div class="modal-bg" id="allBg"><div class="modal" style="max-width:460px;">
-    <h3>Dispatch notes</h3>
+    <h3>Delivery notes</h3>
     <div class="hint">${state.notes.length} created</div>
     <div style="display:flex;flex-direction:column;gap:8px;max-height:340px;overflow:auto;">
       ${state.notes.slice().reverse().map(n => `<div class="card" style="cursor:pointer;" onclick="viewNote('${n.id}')">
@@ -1432,8 +1977,8 @@ function viewAllNotes(){
 
 document.getElementById('notesBtn').addEventListener('click', viewAllNotes);
 document.getElementById('driveBtn').addEventListener('click', onDriveBtnClick);
+document.getElementById('syncBtn').addEventListener('click', openSyncSettings);
 
-const DRIVE_FILE_NAME = 'oakjoinery-stock-board.json';
 const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive';
 
 function updateDriveUi(){
@@ -1442,8 +1987,8 @@ function updateDriveUi(){
   dot.className = 'drive-dot' + (drive.status === 'connected' ? ' on' : drive.status === 'syncing' ? ' syncing' : drive.status === 'error' ? ' err' : '');
   const labels = {
     disconnected: 'Google Drive',
-    connected: 'Drive: synced',
-    syncing: 'Drive: syncing…',
+    connected: 'Drive: archive ready',
+    syncing: 'Drive: connecting…',
     error: 'Drive: error'
   };
   label.textContent = labels[drive.status] || 'Google Drive';
@@ -1455,6 +2000,7 @@ function setDriveStatus(s){
 }
 
 function onDriveBtnClick(){
+  if(!can('manageSync')) return;
   if(!drive.clientId || drive.status === 'disconnected' || drive.status === 'error'){
     openDriveSettings();
   } else {
@@ -1468,7 +2014,7 @@ function openDriveSettings(){
   layer.innerHTML = `<div class="modal-bg" id="driveBg">
     <div class="modal">
       <h3>Google Drive</h3>
-      <div class="hint">${connected ? 'Connected — stock data syncs to your Drive automatically.' : 'Paste your Google OAuth Client ID to connect this board to your Drive.'}</div>
+      <div class="hint">${connected ? 'Connected — signed delivery notes save a permanent PDF copy to your Drive when locked.' : 'Paste your Google OAuth Client ID to save a permanent PDF copy of each signed delivery note to your Drive.'}</div>
       ${!connected ? `
       <div class="field">
         <label>OAuth Client ID</label>
@@ -1541,11 +2087,180 @@ function tryAutoReconnectDrive(){
 
 function disconnectDrive(){
   driveAccessToken = null;
-  drive.fileId = '';
   setDriveStatus('disconnected');
   save();
   closeModal();
 }
+
+function updateSyncUi(){
+  const dot = document.getElementById('cloudDot');
+  const label = document.getElementById('cloudLabel');
+  if(!dot || !label) return;
+  dot.className = 'drive-dot' + (cloudSyncStatus === 'connected' ? ' on' : cloudSyncStatus === 'syncing' ? ' syncing' : cloudSyncStatus === 'error' ? ' err' : '');
+  const labels = {
+    disconnected: 'Sync across devices',
+    connected: 'Synced',
+    syncing: 'Syncing…',
+    error: 'Sync error'
+  };
+  label.textContent = labels[cloudSyncStatus] || 'Sync across devices';
+}
+
+function setSyncStatus(s){
+  cloudSyncStatus = s;
+  updateSyncUi();
+}
+
+function openSyncSettings(){
+  if(!can('manageSync')) return;
+  const layer = document.getElementById('modalLayer');
+  const connected = cloudSyncStatus === 'connected';
+  layer.innerHTML = `<div class="modal-bg" id="syncBg">
+    <div class="modal">
+      <h3>Sync across devices</h3>
+      <div class="hint">${connected ? 'Connected — the board (items, notes, item types) stays the same on every phone and laptop using this key/Bin ID.' : 'Connect this board to a shared jsonbin.io store so every phone and laptop shows the same items and delivery notes.'}</div>
+      <div class="field">
+        <label>API key (X-Master-Key)</label>
+        <input type="text" id="syncApiKeyInput" placeholder="$2b$10$..." style="width:100%;" value="${cloudSync.apiKey || ''}">
+      </div>
+      <div class="field">
+        <label>Bin ID <span style="font-weight:400;">(blank on first device only)</span></label>
+        <input type="text" id="syncBinIdInput" placeholder="e.g. 66f2a1c4..." style="width:100%;" value="${cloudSync.binId || ''}">
+      </div>
+      <div id="syncErr" style="color:var(--rust);font-size:12px;margin-top:8px;display:none;"></div>
+      <div class="modal-actions">
+        <button class="btn" onclick="closeModal()">${connected ? 'Close' : 'Cancel'}</button>
+        <button class="btn" id="syncCreateBtn" onclick="createCloudBinAndConnect()">Create shared store</button>
+        <button class="btn btn-primary" onclick="saveCloudConfigAndConnect()">Connect</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+async function createCloudBinAndConnect(){
+  const apiKey = document.getElementById('syncApiKeyInput').value.trim();
+  const errEl = document.getElementById('syncErr');
+  errEl.style.display = 'none';
+  if(!apiKey){
+    errEl.textContent = 'Enter your API key first.';
+    errEl.style.display = 'block';
+    return;
+  }
+  const btn = document.getElementById('syncCreateBtn');
+  btn.textContent = 'Creating…';
+  btn.disabled = true;
+  try{
+    const binId = await createSharedBin(apiKey);
+    cloudSync = { apiKey, binId };
+    document.getElementById('syncBinIdInput').value = binId;
+    save();
+    setSyncStatus('connected');
+    startCloudPolling();
+    errEl.style.display = 'none';
+  } catch(e){
+    errEl.textContent = 'Could not create a shared store — check the API key and try again.';
+    errEl.style.display = 'block';
+  } finally {
+    btn.textContent = 'Create shared store';
+    btn.disabled = false;
+  }
+}
+
+async function saveCloudConfigAndConnect(){
+  const apiKey = document.getElementById('syncApiKeyInput').value.trim();
+  const binId = document.getElementById('syncBinIdInput').value.trim();
+  const errEl = document.getElementById('syncErr');
+  errEl.style.display = 'none';
+  if(!apiKey || !binId){
+    errEl.textContent = 'Enter both the API key and the Bin ID.';
+    errEl.style.display = 'block';
+    return;
+  }
+  cloudSync = { apiKey, binId };
+  save();
+  const ok = await pullFromCloud(true);
+  if(ok){
+    startCloudPolling();
+    closeModal();
+  } else {
+    errEl.textContent = 'Could not connect — check the API key and Bin ID and try again.';
+    errEl.style.display = 'block';
+  }
+}
+
+async function pullFromCloud(showBusy){
+  if(!cloudSync.apiKey || !cloudSync.binId) return false;
+  try{
+    if(showBusy) setSyncStatus('syncing');
+    const res = await fetch('https://api.jsonbin.io/v3/b/' + cloudSync.binId + '/latest', {
+      headers: { 'X-Master-Key': cloudSync.apiKey }
+    });
+    if(!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    const remote = data.record;
+    if(remote && Array.isArray(remote.items)){
+      state.items = remote.items || [];
+      state.notes = remote.notes || [];
+      nextNo = remote.nextNo || nextNo;
+      itemTypes = (remote.itemTypes && remote.itemTypes.length) ? remote.itemTypes : itemTypes;
+      users = Array.isArray(remote.users) ? remote.users : users;
+      renderTypeSelects();
+      render();
+      renderUserBadge();
+      applyPermissionsToUi();
+      await persistLocal();
+    }
+    setSyncStatus('connected');
+    return true;
+  } catch(e){
+    setSyncStatus('error');
+    return false;
+  }
+}
+
+async function pushToCloud(){
+  if(!cloudSync.apiKey || !cloudSync.binId) return false;
+  try{
+    const content = { items: state.items, notes: state.notes, nextNo, itemTypes, users };
+    const res = await fetch('https://api.jsonbin.io/v3/b/' + cloudSync.binId, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'X-Master-Key': cloudSync.apiKey },
+      body: JSON.stringify(content)
+    });
+    if(!res.ok) throw new Error('HTTP ' + res.status);
+    setSyncStatus('connected');
+    return true;
+  } catch(e){
+    setSyncStatus('error');
+    return false;
+  }
+}
+
+async function createSharedBin(apiKey){
+  const content = { items: state.items, notes: state.notes, nextNo, itemTypes, users };
+  const res = await fetch('https://api.jsonbin.io/v3/b', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Master-Key': apiKey, 'X-Bin-Name': 'oak-joinery-dispatch-board' },
+    body: JSON.stringify(content)
+  });
+  if(!res.ok) throw new Error('HTTP ' + res.status);
+  const data = await res.json();
+  return data.metadata.id;
+}
+
+function queueCloudSync(){
+  if(!cloudSync.apiKey || !cloudSync.binId) return;
+  clearTimeout(cloudSyncTimer);
+  cloudSyncTimer = setTimeout(pushToCloud, 800);
+}
+
+function startCloudPolling(){
+  if(cloudPollTimer) clearInterval(cloudPollTimer);
+  if(!cloudSync.apiKey || !cloudSync.binId) return;
+  cloudPollTimer = setInterval(() => pullFromCloud(false), 120000); // every 2 minutes
+}
+
+window.addEventListener('focus', () => { if(cloudSync.apiKey && cloudSync.binId) pullFromCloud(false); });
 
 async function driveApiFetch(url, options){
   options = options || {};
@@ -1561,41 +2276,6 @@ async function driveApiFetch(url, options){
     throw new Error('Drive API ' + res.status + ' ' + text);
   }
   return res;
-}
-
-async function findDriveFile(){
-  const q = encodeURIComponent(`name='${DRIVE_FILE_NAME}' and trashed=false`);
-  const res = await driveApiFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,modifiedTime)&spaces=drive`);
-  const data = await res.json();
-  return (data.files && data.files[0]) || null;
-}
-
-async function downloadDriveFile(fileId){
-  const res = await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`);
-  return res.json();
-}
-
-async function createDriveFile(content){
-  const boundary = 'oakjoinery-boundary-xyz';
-  const metadata = { name: DRIVE_FILE_NAME, mimeType: 'application/json' };
-  const body =
-    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n` +
-    `--${boundary}\r\nContent-Type: application/json\r\n\r\n${content}\r\n` +
-    `--${boundary}--`;
-  const res = await driveApiFetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', {
-    method: 'POST',
-    headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
-    body
-  });
-  return res.json();
-}
-
-async function updateDriveFile(fileId, content){
-  await driveApiFetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: content
-  });
 }
 
 const DISPATCH_RECORDS_FOLDER = 'Oak Joinery Dispatch Notes';
@@ -1686,70 +2366,331 @@ async function manualSaveRecord(noteId){
 }
 
 async function onDriveSignedIn(){
-  try{
-    let remote = null;
-    if(drive.fileId){
-      try{ remote = await downloadDriveFile(drive.fileId); }
-      catch(e){ drive.fileId = ''; }
-    }
-    if(!remote){
-      const existing = await findDriveFile();
-      if(existing){
-        drive.fileId = existing.id;
-        remote = await downloadDriveFile(existing.id);
-      }
-    }
-    if(remote){
-      state.items = remote.items || [];
-      state.notes = remote.notes || [];
-      nextNo = remote.nextNo || nextNo;
-      itemTypes = (remote.itemTypes && remote.itemTypes.length) ? remote.itemTypes : itemTypes;
-      renderTypeSelects();
-      render();
-      await persistLocal();
-    } else {
-      await pushToDrive();
-    }
-    setDriveStatus('connected');
-  }catch(e){
-    console.error(e);
-    setDriveStatus('error');
-  }
+  // Drive is now only used for archiving PDFs of locked delivery notes —
+  // board data (items/notes/itemTypes) syncs via jsonbin, not Drive.
+  // Signing in just confirms we have a usable access token.
+  setDriveStatus('connected');
 }
+
+// ===================== USERS, LOGIN & PERMISSIONS =====================
+// Client-side only — a deterrent for normal staff use, not a real
+// security boundary (anyone with browser devtools could bypass it).
+// See dev notes CORE DATA MODEL for the users[] shape.
+
+// Auto-logout after inactivity — mainly so a phone left unlocked on a
+// workshop bench doesn't stay logged in as root indefinitely.
+const IDLE_TIMEOUT_MS = 20 * 60 * 1000; // 20 minutes
+let idleTimer = null;
+
+function resetIdleTimer(){
+  clearTimeout(idleTimer);
+  if(!currentUserId) return;
+  idleTimer = setTimeout(() => { if(currentUserId) logoutUser(); }, IDLE_TIMEOUT_MS);
+}
+
+['click', 'keydown', 'touchstart'].forEach(evt => {
+  window.addEventListener(evt, () => { if(currentUserId) resetIdleTimer(); }, { passive: true });
+});
+
+async function checkLogin(){
+  let savedId = null;
+  try{
+    const res = await storage.get('currentUserId', false);
+    savedId = res && res.value ? res.value : null;
+  }catch(e){}
+  if(savedId && users.some(u => u.id === savedId)){
+    currentUserId = savedId;
+    hideLoginOverlay();
+    resetIdleTimer();
+  } else {
+    currentUserId = null;
+    showLoginScreen();
+  }
+  renderUserBadge();
+  applyPermissionsToUi();
+}
+
+function hideLoginOverlay(){
+  const layer = document.getElementById('loginOverlay');
+  layer.innerHTML = '';
+  layer.style.display = 'none';
+}
+
+function showLoginScreen(){
+  const layer = document.getElementById('loginOverlay');
+  layer.className = 'login-overlay';
+  layer.style.display = 'flex';
+
+  if(users.length === 0){
+    layer.innerHTML = `<div class="login-card">
+      <h3>Set up root account</h3>
+      <div class="hint">First time opening this board. Create the main account — it has full access to everything and can add other users afterwards.</div>
+      <div class="field" style="margin-bottom:10px;">
+        <label>Username</label>
+        <input type="text" id="rootUsername" placeholder="e.g. Sean">
+      </div>
+      <div class="field" style="margin-bottom:14px;">
+        <label>PIN (at least 4 characters)</label>
+        <input type="password" id="rootPin" placeholder="••••">
+      </div>
+      <div id="loginErr" style="color:var(--rust);font-size:12px;margin-bottom:10px;display:none;"></div>
+      <button class="btn btn-primary" style="width:100%;" onclick="createRootAccount()">Create root account</button>
+    </div>`;
+    return;
+  }
+
+  layer.innerHTML = `<div class="login-card">
+    <h3>Who's this?</h3>
+    <div class="hint">Pick your name to continue.</div>
+    ${users.map(u => `<button class="user-pick-btn" onclick="promptPin('${u.id}')">${escHtml(u.username)}${u.isRoot ? ' (root)' : ''}</button>`).join('')}
+  </div>`;
+}
+
+function promptPin(userId){
+  const u = users.find(x => x.id === userId);
+  if(!u) return;
+  const layer = document.getElementById('loginOverlay');
+  layer.innerHTML = `<div class="login-card">
+    <h3>${escHtml(u.username)}</h3>
+    <div class="hint">Enter your PIN.</div>
+    <div class="field" style="margin-bottom:14px;">
+      <input type="password" id="pinInput" placeholder="PIN">
+    </div>
+    <div id="loginErr" style="color:var(--rust);font-size:12px;margin-bottom:10px;display:none;"></div>
+    <button class="btn btn-primary" style="width:100%;margin-bottom:8px;" onclick="attemptLogin('${u.id}')">Continue</button>
+    <button class="btn" style="width:100%;" onclick="showLoginScreen()">Back</button>
+  </div>`;
+  const pinEl = document.getElementById('pinInput');
+  pinEl.focus();
+  pinEl.addEventListener('keydown', (e) => { if(e.key === 'Enter') attemptLogin(u.id); });
+}
+
+async function attemptLogin(userId){
+  const u = users.find(x => x.id === userId);
+  if(!u) return;
+
+  const rec = loginAttempts[userId] || { count: 0, lockedUntil: 0 };
+  if(rec.lockedUntil && Date.now() < rec.lockedUntil){
+    const secsLeft = Math.ceil((rec.lockedUntil - Date.now()) / 1000);
+    const err = document.getElementById('loginErr');
+    err.textContent = `Too many wrong attempts. Try again in ${secsLeft}s.`;
+    err.style.display = 'block';
+    return;
+  }
+
+  const entered = document.getElementById('pinInput').value;
+  const enteredHash = await hashPin(entered);
+  if(enteredHash !== u.pin){
+    rec.count += 1;
+    if(rec.count >= MAX_LOGIN_ATTEMPTS){
+      rec.lockedUntil = Date.now() + LOCKOUT_MS;
+      rec.count = 0;
+    }
+    loginAttempts[userId] = rec;
+    const err = document.getElementById('loginErr');
+    err.textContent = rec.lockedUntil && Date.now() < rec.lockedUntil
+      ? `Too many wrong attempts. Try again in ${Math.ceil(LOCKOUT_MS/1000)}s.`
+      : "Incorrect PIN. Ask your admin to reset it if you've forgotten it.";
+    err.style.display = 'block';
+    return;
+  }
+
+  delete loginAttempts[userId];
+  currentUserId = u.id;
+  try{ await storage.set('currentUserId', u.id, false); }catch(e){}
+  hideLoginOverlay();
+  renderUserBadge();
+  applyPermissionsToUi();
+  resetIdleTimer();
+}
+
+async function createRootAccount(){
+  const username = document.getElementById('rootUsername').value.trim();
+  const pin = document.getElementById('rootPin').value;
+  const err = document.getElementById('loginErr');
+  err.style.display = 'none';
+  if(!username || pin.length < 4){
+    err.textContent = 'Enter a username and a PIN of at least 4 characters.';
+    err.style.display = 'block';
+    return;
+  }
+  const pinHash = await hashPin(pin);
+  const rootUser = { id: uid(), username, pin: pinHash, isRoot: true, permissions: defaultPermissions() };
+  users.push(rootUser);
+  currentUserId = rootUser.id;
+  try{ await storage.set('currentUserId', rootUser.id, false); }catch(e){}
+  save();
+  hideLoginOverlay();
+  renderUserBadge();
+  applyPermissionsToUi();
+  resetIdleTimer();
+}
+
+async function logoutUser(){
+  currentUserId = null;
+  clearTimeout(idleTimer);
+  try{ await storage.set('currentUserId', '', false); }catch(e){}
+  showLoginScreen();
+  renderUserBadge();
+  applyPermissionsToUi();
+}
+
+function renderUserBadge(){
+  const el = document.getElementById('userBadge');
+  if(!el) return;
+  const u = getCurrentUser();
+  el.innerHTML = u ? `Logged in as <b>${escHtml(u.username)}</b>${u.isRoot ? ' (root)' : ''} · <button onclick="logoutUser()">Switch user</button>` : '';
+}
+
+function applyPermissionsToUi(){
+  const set = (id, visible) => {
+    const el = document.getElementById(id);
+    if(el) el.style.display = visible ? '' : 'none';
+  };
+  set('addbarMain', can('addItems'));
+  set('addbarFin', can('addItems'));
+  set('addbarDis', can('addItems'));
+  set('manageTypesBtn', can('manageTypes'));
+  set('exportBtn', can('exportData'));
+  set('combineBtn', can('exportData'));
+  set('notesBtn', can('manageNotes'));
+  set('syncBtn', can('manageSync'));
+  set('driveBtn', can('manageSync'));
+  set('manageUsersBtn', can('manageUsers'));
+  render();
+}
+
+const PERMISSION_LABELS = [
+  ['addItems', 'Add items'],
+  ['removeItems', 'Remove items'],
+  ['moveItems', 'Move items (mark finished / add to delivery note)'],
+  ['manageNotes', 'Manage delivery notes (view, sign)'],
+  ['manageTypes', 'Manage item catalog'],
+  ['exportData', 'Download sheet / combine duplicates'],
+  ['manageSync', 'Manage sync & Google Drive settings'],
+  ['manageUsers', 'Manage users']
+];
+
+function openManageUsers(editId){
+  if(!can('manageUsers')) return;
+  const layer = document.getElementById('modalLayer');
+  const editing = editId ? users.find(u => u.id === editId) : null;
+  const perms = editing ? editing.permissions : defaultPermissions();
+
+  layer.innerHTML = `<div class="modal-bg" id="usersBg">
+    <div class="modal" style="max-width:520px;">
+      <h3>${editing ? 'Edit user' : 'Manage users'}</h3>
+      ${editing ? '' : `<div class="hint">Add people who use this board and choose exactly what each one can do.</div>
+      <div id="userList">
+        ${users.map(u => `<div class="user-row">
+          <span class="who">${escHtml(u.username)}${u.isRoot ? '<span class="tag">Root — full access</span>' : ''}</span>
+          <span class="acts">
+            <button onclick="openManageUsers('${u.id}')">Edit</button>
+            ${users.length > 1 ? `<button onclick="deleteUser('${u.id}')">Delete</button>` : ''}
+          </span>
+        </div>`).join('')}
+      </div>
+      <div style="margin-top:16px;font-weight:600;font-size:13px;">Add a new user</div>`}
+      <div class="field" style="margin:10px 0;">
+        <label>Username</label>
+        <input type="text" id="userFormUsername" value="${editing ? editing.username : ''}">
+      </div>
+      <div class="field" style="margin-bottom:10px;">
+        <label>PIN</label>
+        <input type="text" id="userFormPin" value="" placeholder="${editing ? 'Leave blank to keep current PIN' : 'At least 4 characters'}">
+      </div>
+      <label style="display:flex;align-items:center;gap:7px;font-size:13px;font-weight:400;margin-bottom:6px;">
+        <input type="checkbox" id="userFormRoot" ${editing && editing.isRoot ? 'checked' : ''}> Full access (root — can do everything)
+      </label>
+      <div class="perm-grid" id="permGrid">
+        ${PERMISSION_LABELS.map(([key,label]) => `<label><input type="checkbox" class="permCheck" data-key="${key}" ${perms[key] ? 'checked' : ''}> ${label}</label>`).join('')}
+      </div>
+      <div id="userFormErr" style="color:var(--rust);font-size:12px;margin-top:6px;display:none;"></div>
+      <div class="modal-actions">
+        <button class="btn" onclick="${editing ? 'openManageUsers()' : 'closeModal()'}">${editing ? 'Back' : 'Close'}</button>
+        <button class="btn btn-primary" onclick="saveUserForm(${editing ? `'${editing.id}'` : 'null'})">${editing ? 'Save changes' : 'Add user'}</button>
+      </div>
+    </div>
+  </div>`;
+
+  const rootToggle = document.getElementById('userFormRoot');
+  const applyRootLock = () => {
+    document.getElementById('permGrid').style.opacity = rootToggle.checked ? '.4' : '1';
+    document.querySelectorAll('.permCheck').forEach(cb => cb.disabled = rootToggle.checked);
+  };
+  rootToggle.addEventListener('change', applyRootLock);
+  applyRootLock();
+}
+
+async function saveUserForm(editId){
+  const username = document.getElementById('userFormUsername').value.trim();
+  const pin = document.getElementById('userFormPin').value;
+  const isRoot = document.getElementById('userFormRoot').checked;
+  const err = document.getElementById('userFormErr');
+  err.style.display = 'none';
+  if(!username){
+    err.textContent = 'Enter a username.';
+    err.style.display = 'block';
+    return;
+  }
+  if(!editId && pin.length < 4){
+    err.textContent = 'Enter a PIN of at least 4 characters.';
+    err.style.display = 'block';
+    return;
+  }
+  if(pin && pin.length < 4){
+    err.textContent = 'PIN must be at least 4 characters (or leave it blank to keep the current one).';
+    err.style.display = 'block';
+    return;
+  }
+  if(users.some(u => u.username.toLowerCase() === username.toLowerCase() && u.id !== editId)){
+    err.textContent = 'That username is already taken.';
+    err.style.display = 'block';
+    return;
+  }
+  const permissions = defaultPermissions();
+  document.querySelectorAll('.permCheck').forEach(cb => { permissions[cb.dataset.key] = cb.checked; });
+
+  if(editId){
+    const u = users.find(x => x.id === editId);
+    if(u){
+      u.username = username;
+      if(pin) u.pin = await hashPin(pin);
+      u.isRoot = isRoot;
+      u.permissions = permissions;
+    }
+  } else {
+    users.push({ id: uid(), username, pin: await hashPin(pin), isRoot, permissions });
+  }
+  save();
+  renderUserBadge();
+  applyPermissionsToUi();
+  openManageUsers();
+}
+
+function deleteUser(userId){
+  const target = users.find(u => u.id === userId);
+  if(!target) return;
+  if(target.isRoot && users.filter(u => u.isRoot).length <= 1){
+    alert("You can't delete the only root account — make another user root first.");
+    return;
+  }
+  if(userId === currentUserId){
+    alert("You can't delete the account you're currently logged in as. Switch to another user first.");
+    return;
+  }
+  if(!confirm(`Remove ${target.username}?`)) return;
+  users = users.filter(u => u.id !== userId);
+  save();
+  openManageUsers();
+}
+
+document.getElementById('manageUsersBtn').addEventListener('click', () => openManageUsers());
 
 async function persistLocal(){
   try{
-    await storage.set('board', JSON.stringify({items: state.items, notes: state.notes, nextNo, itemTypes, drive: {clientId: drive.clientId, fileId: drive.fileId}}), false);
+    await storage.set('board', JSON.stringify({items: state.items, notes: state.notes, nextNo, itemTypes, users, drive: {clientId: drive.clientId}, sync: {apiKey: cloudSync.apiKey, binId: cloudSync.binId}}), false);
   }catch(e){ console.error('storage failed', e); }
-}
-
-function queueDriveSync(){
-  if(!driveAccessToken) return;
-  clearTimeout(driveSyncTimer);
-  driveSyncTimer = setTimeout(pushToDrive, 800);
-}
-
-async function pushToDrive(){
-  if(!driveAccessToken) return;
-  setDriveStatus('syncing');
-  try{
-    const content = JSON.stringify({items: state.items, notes: state.notes, nextNo, itemTypes});
-    if(!drive.fileId){
-      const existing = await findDriveFile();
-      if(existing) drive.fileId = existing.id;
-    }
-    if(drive.fileId){
-      await updateDriveFile(drive.fileId, content);
-    } else {
-      const created = await createDriveFile(content);
-      drive.fileId = created.id;
-    }
-    await persistLocal();
-    setDriveStatus('connected');
-  }catch(e){
-    console.error(e);
-    setDriveStatus('error');
-  }
 }
 
 load();
