@@ -17,6 +17,63 @@ batched up later. Also update the relevant reference section below
 ========================================================================
 CHANGELOG (most recent first — add a new dated entry after every change)
 ========================================================================
+- 2026-09-07 (later still, #2): Two per-user requests to fix the "forced
+  into Create root account on a new device" problem directly, rather
+  than only patching the data-loss bug it exposed:
+    1. CONNECT-INSTEAD-OF-CREATE AT FIRST LAUNCH — the empty-users[]
+       login screen (showLoginScreen) now has a small "Already have a
+       board on another device? Connect instead" link below the
+       "Create root account" button. It opens showConnectExistingBoard()
+       — a simple API Key + Bin ID form — and
+       connectToExistingBoardFromLogin() sets cloudSync and calls
+       pullFromCloud(true) to pull the REAL board (items/notes/
+       itemTypes/users) down before any local account is created. On
+       success (and users.length > 0), it calls startCloudPolling()
+       and re-renders showLoginScreen(), which now shows the normal
+       "Who's this?" picker with the real accounts instead of forcing
+       a new root account. Deliberately mirrors the ordering fix from
+       saveCloudConfigAndConnect just above (pull BEFORE any save()) —
+       calling save() here first would reproduce the exact same
+       data-destroying race on every future new device, which is the
+       whole reason this feature was worth adding in the first place.
+       If the entered API key/Bin ID connects successfully but that
+       board genuinely has no users yet, shows a message suggesting
+       "Create root account" instead rather than silently doing
+       nothing.
+    2. SELF-SERVICE "CHANGE MY PIN" — renderUserBadge() now shows a
+       "Change PIN" link next to "Switch user", open to EVERY logged-in
+       user regardless of the manageUsers permission (openChangeOwnPin/
+       saveOwnPin). Previously only someone with manageUsers could
+       change ANY PIN via Manage Users/Edit user — a non-root staff
+       member with no permissions couldn't even change their own. This
+       only ever touches getCurrentUser()'s own record; it does not
+       replace or bypass Manage Users' broader edit-any-user flow
+       (still gated by manageUsers as before).
+- 2026-09-07 (later still): Fixed a real data-loss bug in
+  saveCloudConfigAndConnect (the "Connect" button flow used by every
+  device AFTER the first, i.e. entering an existing API key + Bin ID),
+  found when connecting a fresh phone actually deleted the real synced
+  data. Root cause: the function called save() (which queues a
+  debounced pushToCloud() ~800ms later) BEFORE awaiting
+  pullFromCloud(true). On a fresh device — forced through "Create
+  root account" first since users[] starts empty — state at that
+  point is still empty/local-only. Downloading and reassembling all
+  the real chunks now reliably takes longer than 800ms (chunking +
+  the 2026-09-07 rate-limit pacing added earlier today), so the queued
+  push almost always fired first, overwriting the manifest with the
+  empty local board and deleting the real chunk bins via pushToCloud's
+  "board shrank, clean up unused chunks" logic — destroying the real
+  data before the pull ever got to apply it. FIX: removed that save()
+  call entirely. pullFromCloud() already calls persistLocal() itself
+  on success, persisting both the freshly-downloaded real data AND the
+  cloudSync{apiKey,binId} object to local storage — so nothing was
+  actually lost by not saving beforehand, and the destructive race is
+  gone. If pull fails, cloudSync now correctly stays in-memory only
+  (not persisted), matching the original intent of not saving bad
+  credentials. createCloudBinAndConnect (the FIRST-device "Create
+  shared store" flow) was checked and does NOT have this bug — it
+  pushes that device's own real local state with no competing pull
+  afterward, so its save() call is correct and was left unchanged.
 - 2026-09-07: Added rate-limit resilience to the chunked jsonbin sync
   (pullFromCloud/pushToCloud/createSharedBin), per user request after
   hitting HTTP 429s during a real sync test. A chunked push/pull can
@@ -2220,7 +2277,14 @@ async function saveCloudConfigAndConnect(){
     return;
   }
   cloudSync = { apiKey, binId };
-  save();
+  // NOTE: deliberately NOT calling save() here. save() queues a debounced
+  // push of the CURRENT (possibly empty, on a fresh device) local state —
+  // if that push fires before pullFromCloud below finishes downloading the
+  // real chunks, it overwrites/deletes the real remote data with the
+  // empty local board. pullFromCloud already calls persistLocal() itself
+  // on success, which writes both the freshly-pulled data AND this
+  // cloudSync object to local storage — so nothing is lost by skipping
+  // save() here, and the destructive race is avoided entirely.
   const ok = await pullFromCloud(true);
   if(ok){
     startCloudPolling();
@@ -2583,6 +2647,10 @@ function showLoginScreen(){
       </div>
       <div id="loginErr" style="color:var(--rust);font-size:12px;margin-bottom:10px;display:none;"></div>
       <button class="btn btn-primary" style="width:100%;" onclick="createRootAccount()">Create root account</button>
+      <div style="text-align:center;margin-top:14px;font-size:12px;color:var(--muted);">
+        Already have a board set up on another device?
+        <button onclick="showConnectExistingBoard()" style="background:none;border:none;color:var(--amber);text-decoration:underline;cursor:pointer;padding:0;font-size:12px;">Connect instead</button>
+      </div>
     </div>`;
     return;
   }
@@ -2592,6 +2660,67 @@ function showLoginScreen(){
     <div class="hint">Pick your name to continue.</div>
     ${users.map(u => `<button class="user-pick-btn" onclick="promptPin('${u.id}')">${escHtml(u.username)}${u.isRoot ? ' (root)' : ''}</button>`).join('')}
   </div>`;
+}
+
+// Lets a brand-new device (empty local users[]) skip creating a whole new
+// root account and instead pull down the REAL board — including the real
+// users[] — from an already-connected device's jsonbin sync, so the
+// person can log in with their existing account instead of accidentally
+// starting a second, disconnected board. See dev notes changelog
+// (2026-09-07, "self-service login/connect at first launch") for the
+// data-loss bug this was added alongside — connectToExistingBoardFromLogin
+// below deliberately mirrors saveCloudConfigAndConnect's fixed ordering
+// (pull BEFORE any save()) for the same reason.
+function showConnectExistingBoard(){
+  const layer = document.getElementById('loginOverlay');
+  layer.innerHTML = `<div class="login-card">
+    <h3>Connect to existing board</h3>
+    <div class="hint">Enter the same jsonbin API key and Bin ID used on your other device(s) — this will pull down your real board and accounts.</div>
+    <div class="field" style="margin-bottom:10px;">
+      <label>API Key (X-Master-Key)</label>
+      <input type="text" id="loginConnectApiKey" placeholder="Paste your jsonbin API key">
+    </div>
+    <div class="field" style="margin-bottom:14px;">
+      <label>Bin ID</label>
+      <input type="text" id="loginConnectBinId" placeholder="e.g. 66f2a1c4...">
+    </div>
+    <div id="loginErr" style="color:var(--rust);font-size:12px;margin-bottom:10px;display:none;"></div>
+    <button class="btn btn-primary" style="width:100%;margin-bottom:8px;" id="loginConnectBtn" onclick="connectToExistingBoardFromLogin()">Connect</button>
+    <button class="btn" style="width:100%;" onclick="showLoginScreen()">Back</button>
+  </div>`;
+}
+
+async function connectToExistingBoardFromLogin(){
+  const apiKey = document.getElementById('loginConnectApiKey').value.trim();
+  const binId = document.getElementById('loginConnectBinId').value.trim();
+  const err = document.getElementById('loginErr');
+  err.style.display = 'none';
+  if(!apiKey || !binId){
+    err.textContent = 'Enter both the API key and the Bin ID.';
+    err.style.display = 'block';
+    return;
+  }
+  const btn = document.getElementById('loginConnectBtn');
+  btn.textContent = 'Connecting…';
+  btn.disabled = true;
+  cloudSync = { apiKey, binId };
+  // Deliberately no save()/persist call before this pull — see the note
+  // above showConnectExistingBoard() and the 2026-09-07 changelog entry
+  // for why that ordering caused real data loss elsewhere in the app.
+  const ok = await pullFromCloud(true);
+  btn.textContent = 'Connect';
+  btn.disabled = false;
+  if(ok && users.length > 0){
+    startCloudPolling();
+    updateSyncUi();
+    showLoginScreen(); // now shows the real "Who's this?" picker
+  } else if(ok && users.length === 0){
+    err.textContent = 'Connected, but that board has no accounts set up yet — check the Bin ID, or use "Create root account" instead if this is actually a fresh board.';
+    err.style.display = 'block';
+  } else {
+    err.textContent = 'Could not connect — check the API key and Bin ID and try again.';
+    err.style.display = 'block';
+  }
 }
 
 function promptPin(userId){
@@ -2687,7 +2816,47 @@ function renderUserBadge(){
   const el = document.getElementById('userBadge');
   if(!el) return;
   const u = getCurrentUser();
-  el.innerHTML = u ? `Logged in as <b>${escHtml(u.username)}</b>${u.isRoot ? ' (root)' : ''} · <button onclick="logoutUser()">Switch user</button>` : '';
+  el.innerHTML = u ? `Logged in as <b>${escHtml(u.username)}</b>${u.isRoot ? ' (root)' : ''} · <button onclick="openChangeOwnPin()">Change PIN</button> · <button onclick="logoutUser()">Switch user</button>` : '';
+}
+
+// Self-service PIN change — deliberately available to EVERY logged-in
+// user regardless of the manageUsers permission (that permission gates
+// editing OTHER people's accounts via Manage Users; this only ever
+// touches the currently logged-in user's own PIN).
+function openChangeOwnPin(){
+  const u = getCurrentUser();
+  if(!u) return;
+  const layer = document.getElementById('modalLayer');
+  layer.innerHTML = `<div class="modal-bg" id="ownPinBg">
+    <div class="modal" style="max-width:360px;">
+      <h3>Change my PIN</h3>
+      <div class="hint">Update the PIN for your own account (${escHtml(u.username)}).</div>
+      <div class="field" style="margin-bottom:14px;">
+        <label>New PIN (at least 4 characters)</label>
+        <input type="password" id="ownNewPin" placeholder="••••">
+      </div>
+      <div id="ownPinErr" style="color:var(--rust);font-size:12px;margin-bottom:8px;display:none;"></div>
+      <div class="modal-actions">
+        <button class="btn" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveOwnPin()">Save</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+async function saveOwnPin(){
+  const u = getCurrentUser();
+  if(!u) return;
+  const pin = document.getElementById('ownNewPin').value;
+  const err = document.getElementById('ownPinErr');
+  if(pin.length < 4){
+    err.textContent = 'PIN must be at least 4 characters.';
+    err.style.display = 'block';
+    return;
+  }
+  u.pin = await hashPin(pin);
+  save();
+  closeModal();
 }
 
 function applyPermissionsToUi(){
