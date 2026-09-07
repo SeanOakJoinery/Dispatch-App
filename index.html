@@ -17,6 +17,35 @@ batched up later. Also update the relevant reference section below
 ========================================================================
 CHANGELOG (most recent first — add a new dated entry after every change)
 ========================================================================
+- 2026-09-07 (later still, #4): Made the app installable as a PWA
+  ("Install app" button), per user request. New files alongside
+  index.html: manifest.json (name/icons/start_url/display:standalone,
+  matching the app's dark/amber branding), sw.js (a deliberately minimal
+  service worker — install/activate/fetch handlers only, no caching —
+  its only job is to exist so Chrome will fire beforeinstallprompt; see
+  its own file comment for why offline caching was intentionally left
+  out), and four generated PNG icons (icon-192.png, icon-512.png,
+  icon-512-maskable.png with extra safe-zone padding for OS icon
+  masking, apple-touch-icon.png) built from the app's OAK/JOINERY
+  logotype on the --bg dark background. index.html additions: manifest
+  link + theme-color meta + apple-touch-icon link in <head>; a new
+  "📲 Install app" toolbar button (installBtn, hidden by default); JS
+  near the end of the script that registers sw.js, listens for
+  beforeinstallprompt (captures it, shows the button, fires
+  prompt() on click — the standard Android/Chrome/desktop install
+  flow), and separately detects iOS (which never fires that event —
+  Apple has no programmatic install API) to show the same button but
+  open an instructions modal for the manual Share > Add to Home Screen
+  steps instead. Both paths check display-mode:standalone /
+  navigator.standalone first and hide the button if already running
+  as an installed app. NOT gated by can()/permissions — installing the
+  app to a device is a device-level convenience, not a data-sensitive
+  action, so it's available before login too (just visually covered by
+  the login overlay like the rest of the toolbar until logged in).
+  IMPORTANT DEPLOYMENT NOTE: manifest.json, sw.js, and the four icon
+  PNGs must be uploaded to the SAME repo directory as index.html (not
+  just index.html alone) or the install prompt won't fire — GitHub
+  Pages serves them as static files from wherever they sit in the repo.
 - 2026-09-07 (later still, #3): Changed "Connect instead" (added in the
   previous entry) from asking for the jsonbin API Key + Bin ID to just
   asking for username + PIN, per user request — much friendlier for
@@ -598,6 +627,10 @@ WHEN THE USER UPLOADS THIS FILE AGAIN
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Dispatch</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#1E1C18">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="icon" href="icon-192.png" type="image/png">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -808,6 +841,7 @@ WHEN THE USER UPLOADS THIS FILE AGAIN
   <button class="btn" id="combineBtn">Combine duplicates</button>
   <button class="btn" id="notesBtn">Delivery notes (<span id="notesCount">0</span>)</button>
   <button class="btn" id="manageUsersBtn">Manage users</button>
+  <button class="btn btn-primary" id="installBtn" style="display:none;">📲 Install app</button>
 </div>
 
 <div class="addbar" id="addbarMain">
@@ -3059,6 +3093,78 @@ async function persistLocal(){
   try{
     await storage.set('board', JSON.stringify({items: state.items, notes: state.notes, nextNo, itemTypes, users, drive: {clientId: drive.clientId}, sync: {apiKey: cloudSync.apiKey, binId: cloudSync.binId}}), false);
   }catch(e){ console.error('storage failed', e); }
+}
+
+// PWA install button. On Android/desktop Chrome, the browser fires
+// beforeinstallprompt when the site is installable (manifest + active
+// service worker + served over https, which GitHub Pages satisfies) — we
+// capture that event, keep it around, and trigger it manually from our own
+// styled button instead of Chrome's default mini-infobar. iOS Safari never
+// fires this event (Apple doesn't support it) and has no programmatic
+// install API at all — for iOS we detect the platform and show the button
+// anyway, but clicking it opens a short instructions modal for the manual
+// "Share > Add to Home Screen" steps instead.
+let deferredInstallPrompt = null;
+const installBtn = document.getElementById('installBtn');
+
+function isIos(){
+  return /iphone|ipad|ipod/i.test(navigator.userAgent);
+}
+function isInStandaloneMode(){
+  return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+}
+
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('sw.js').catch(() => {});
+}
+
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  deferredInstallPrompt = e;
+  if(!isInStandaloneMode() && installBtn) installBtn.style.display = '';
+});
+
+window.addEventListener('appinstalled', () => {
+  deferredInstallPrompt = null;
+  if(installBtn) installBtn.style.display = 'none';
+});
+
+// iOS never fires beforeinstallprompt, so show the button unconditionally
+// there (unless already running as an installed home-screen app) unlike
+// the Android/desktop path above which waits for that event.
+if(isIos() && !isInStandaloneMode() && installBtn){
+  installBtn.style.display = '';
+}
+
+if(installBtn){
+  installBtn.addEventListener('click', async () => {
+    if(deferredInstallPrompt){
+      deferredInstallPrompt.prompt();
+      const choice = await deferredInstallPrompt.userChoice;
+      deferredInstallPrompt = null;
+      if(choice.outcome === 'accepted') installBtn.style.display = 'none';
+      return;
+    }
+    if(isIos()){
+      const layer = document.getElementById('modalLayer');
+      layer.innerHTML = `<div class="modal-bg" id="iosInstallBg">
+        <div class="modal" style="max-width:360px;">
+          <h3>Install Dispatch</h3>
+          <div class="hint">iPhone/iPad doesn't support one-tap install from the app itself — a couple of manual taps in Safari does the same thing:</div>
+          <div style="font-size:13px;line-height:1.7;">
+            1. Tap the <b>Share</b> button (the square with an arrow) in Safari's toolbar.<br>
+            2. Scroll down and tap <b>Add to Home Screen</b>.<br>
+            3. Tap <b>Add</b> in the top right.
+          </div>
+          <div class="modal-actions">
+            <button class="btn btn-primary" onclick="closeModal()">Got it</button>
+          </div>
+        </div>
+      </div>`;
+      return;
+    }
+    alert("Your browser doesn't support installing this app directly. Look for an 'Install' or 'Add to Home Screen' option in your browser's menu.");
+  });
 }
 
 load();
