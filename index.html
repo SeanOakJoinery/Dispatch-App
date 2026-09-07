@@ -17,6 +17,28 @@ batched up later. Also update the relevant reference section below
 ========================================================================
 CHANGELOG (most recent first — add a new dated entry after every change)
 ========================================================================
+- 2026-09-07 (later still, #3): Changed "Connect instead" (added in the
+  previous entry) from asking for the jsonbin API Key + Bin ID to just
+  asking for username + PIN, per user request — much friendlier for
+  staff on a new device who don't know or shouldn't need to handle raw
+  jsonbin credentials. Added DEFAULT_CLOUD_SYNC (apiKey, binId) as a
+  baked-in constant near the cloudSync declaration, holding this
+  board's actual jsonbin credentials — same "visible in page source,
+  not a real secret, fine for a single-board internal staff tool" caveat
+  as the existing hardcoded Google Drive Client ID. connectToExisting-
+  BoardFromLogin() now: sets cloudSync from DEFAULT_CLOUD_SYNC, pulls
+  the real board (same safe no-save()-before-pull ordering as before),
+  then finds a user in the freshly-pulled users[] whose username
+  matches (case-insensitive) and whose hashPin(enteredPin) matches
+  their stored hash — logging them straight in (sets currentUserId,
+  persists it, starts polling, hides the overlay) on success, or a
+  generic "Incorrect username or PIN" on failure (deliberately doesn't
+  reveal which of the two was wrong). showConnectExistingBoard()'s form
+  fields changed to match (Username/PIN instead of API Key/Bin ID); the
+  Enter key now submits from the PIN field like the normal PIN-entry
+  screen does. NOTE: if this board's jsonbin API key or Bin ID is ever
+  rotated/changed, DEFAULT_CLOUD_SYNC must be updated to match, or
+  "Connect instead" will silently fail for new devices.
 - 2026-09-07 (later still, #2): Two per-user requests to fix the "forced
   into Create root account on a new device" problem directly, rather
   than only patching the data-loss bug it exposed:
@@ -896,6 +918,19 @@ let drive = { clientId: '', status: 'disconnected' }; // status: disconnected|co
 let driveAccessToken = null;
 let tokenClient = null;
 let cloudSync = { apiKey: '', binId: '' }; // jsonbin.io — board data sync, independent of Drive
+
+// Fixed jsonbin credentials for THIS board, baked in so a brand-new device
+// can "Connect instead" at first launch using just a username + PIN rather
+// than needing someone to know/paste the API key and Bin ID by hand. Same
+// caveat as the Google Drive Client ID above: visible to anyone who views
+// page source, not a real secret — fine for staff convenience on a
+// single-board internal tool, not for anything with real access-control
+// stakes. If this board's API key or Bin ID ever changes (e.g. rotating
+// the jsonbin key), update both values here.
+const DEFAULT_CLOUD_SYNC = {
+  apiKey: '$2a$10$l6JD2KxQKAU7bhxR7mJFAOtoHFmgMxKgUWE0rHo7zLCpC3OzRFzim',
+  binId: '6a9e72e8ffd5d16053e857ef'
+};
 let cloudSyncStatus = 'disconnected'; // disconnected|syncing|connected|error
 let cloudSyncTimer = null;
 let cloudPollTimer = null;const CHUNK_SIZE = 60000; // chars per chunk — keeps each chunk bin safely under jsonbin's 100KB free-tier cap after JSON-escaping overhead
@@ -2675,52 +2710,68 @@ function showConnectExistingBoard(){
   const layer = document.getElementById('loginOverlay');
   layer.innerHTML = `<div class="login-card">
     <h3>Connect to existing board</h3>
-    <div class="hint">Enter the same jsonbin API key and Bin ID used on your other device(s) — this will pull down your real board and accounts.</div>
+    <div class="hint">Enter your existing username and PIN — this will pull down the real board and log you straight in.</div>
     <div class="field" style="margin-bottom:10px;">
-      <label>API Key (X-Master-Key)</label>
-      <input type="text" id="loginConnectApiKey" placeholder="Paste your jsonbin API key">
+      <label>Username</label>
+      <input type="text" id="loginConnectUsername" placeholder="e.g. Sean">
     </div>
     <div class="field" style="margin-bottom:14px;">
-      <label>Bin ID</label>
-      <input type="text" id="loginConnectBinId" placeholder="e.g. 66f2a1c4...">
+      <label>PIN</label>
+      <input type="password" id="loginConnectPin" placeholder="••••">
     </div>
     <div id="loginErr" style="color:var(--rust);font-size:12px;margin-bottom:10px;display:none;"></div>
-    <button class="btn btn-primary" style="width:100%;margin-bottom:8px;" id="loginConnectBtn" onclick="connectToExistingBoardFromLogin()">Connect</button>
+    <button class="btn btn-primary" style="width:100%;margin-bottom:8px;" id="loginConnectBtn" onclick="connectToExistingBoardFromLogin()">Connect &amp; log in</button>
     <button class="btn" style="width:100%;" onclick="showLoginScreen()">Back</button>
   </div>`;
+  const pinEl = document.getElementById('loginConnectPin');
+  pinEl.addEventListener('keydown', (e) => { if(e.key === 'Enter') connectToExistingBoardFromLogin(); });
 }
 
 async function connectToExistingBoardFromLogin(){
-  const apiKey = document.getElementById('loginConnectApiKey').value.trim();
-  const binId = document.getElementById('loginConnectBinId').value.trim();
+  const username = document.getElementById('loginConnectUsername').value.trim();
+  const pin = document.getElementById('loginConnectPin').value;
   const err = document.getElementById('loginErr');
   err.style.display = 'none';
-  if(!apiKey || !binId){
-    err.textContent = 'Enter both the API key and the Bin ID.';
+  if(!username || !pin){
+    err.textContent = 'Enter both your username and PIN.';
     err.style.display = 'block';
     return;
   }
   const btn = document.getElementById('loginConnectBtn');
   btn.textContent = 'Connecting…';
   btn.disabled = true;
-  cloudSync = { apiKey, binId };
+  cloudSync = { apiKey: DEFAULT_CLOUD_SYNC.apiKey, binId: DEFAULT_CLOUD_SYNC.binId };
   // Deliberately no save()/persist call before this pull — see the note
   // above showConnectExistingBoard() and the 2026-09-07 changelog entry
   // for why that ordering caused real data loss elsewhere in the app.
   const ok = await pullFromCloud(true);
-  btn.textContent = 'Connect';
+  btn.textContent = 'Connect & log in';
   btn.disabled = false;
-  if(ok && users.length > 0){
-    startCloudPolling();
-    updateSyncUi();
-    showLoginScreen(); // now shows the real "Who's this?" picker
-  } else if(ok && users.length === 0){
-    err.textContent = 'Connected, but that board has no accounts set up yet — check the Bin ID, or use "Create root account" instead if this is actually a fresh board.';
+  if(!ok){
+    err.textContent = 'Could not reach the board — check your internet connection and try again.';
     err.style.display = 'block';
-  } else {
-    err.textContent = 'Could not connect — check the API key and Bin ID and try again.';
-    err.style.display = 'block';
+    return;
   }
+  if(users.length === 0){
+    err.textContent = 'Connected, but that board has no accounts set up yet. Use "Back" and "Create root account" instead if this is actually a fresh board.';
+    err.style.display = 'block';
+    return;
+  }
+  const match = users.find(u => u.username.toLowerCase() === username.toLowerCase());
+  const enteredHash = await hashPin(pin);
+  if(!match || enteredHash !== match.pin){
+    err.textContent = 'Incorrect username or PIN.';
+    err.style.display = 'block';
+    return;
+  }
+  currentUserId = match.id;
+  try{ await storage.set('currentUserId', match.id, false); }catch(e){}
+  startCloudPolling();
+  updateSyncUi();
+  hideLoginOverlay();
+  renderUserBadge();
+  applyPermissionsToUi();
+  resetIdleTimer();
 }
 
 function promptPin(userId){
