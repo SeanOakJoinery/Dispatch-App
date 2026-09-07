@@ -17,6 +17,48 @@ batched up later. Also update the relevant reference section below
 ========================================================================
 CHANGELOG (most recent first — add a new dated entry after every change)
 ========================================================================
+- 2026-09-07: Added rate-limit resilience to the chunked jsonbin sync
+  (pullFromCloud/pushToCloud/createSharedBin), per user request after
+  hitting HTTP 429s during a real sync test. A chunked push/pull can
+  fire a dozen-plus requests in quick succession, which tripped
+  jsonbin's free-tier burst rate limit even though the total request
+  budget (10,000, non-expiring) was nowhere near used. Added:
+    1. fetchWithRetry(url, opts, maxRetries) — wraps fetch, retries up
+       to 3x on a 429 response, honouring the Retry-After header if
+       jsonbin sends one, otherwise backing off 1s/2s/4s. Every
+       jsonbin fetch call in the three sync functions above now goes
+       through this instead of calling fetch() directly.
+    2. sleep(ms) helper + a 350ms pause inserted after each chunk
+       request inside pullFromCloud's chunk-download loop,
+       pushToCloud's chunk-upload loop, and pushToCloud's stale-chunk
+       cleanup loop — paces requests so a full sync doesn't arrive as
+       one burst in the first place. Adds a few seconds to a full
+       sync (roughly chunk-count × 350ms) but stays well under the
+       burst limit and self-heals via retry if still throttled
+       occasionally.
+  BOARD DATA SYNC section below updated to mention this.
+- 2026-09-07 (earlier): Split BOARD DATA SYNC into a chunked scheme,
+  per user request, after discovering the live board (~685KB once
+  real stock data was restored) is far over jsonbin's 100KB free-tier
+  per-record cap:
+    createSharedBin() now creates an empty "manifest" bin only
+    ({manifest:true, chunkBinIds:[], chunkCount:0}) instead of one
+    bin holding the whole board. pushToCloud() JSON-stringifies the
+    board, splits it into CHUNK_SIZE (60000 char) pieces, PUTs each
+    into its own existing chunk bin (or POSTs a new one if the board
+    grew), DELETEs any now-unused chunk bins if the board shrank, then
+    PUTs the manifest with the resulting chunkBinIds/chunkCount/
+    updatedAt. pullFromCloud() reads the manifest first; if its
+    updatedAt matches cloudLastUpdatedAt (module-level var, set after
+    every successful push or pull) it skips re-downloading anything —
+    this keeps idle 2-minute polling cheap (1 request instead of a
+    dozen) when nothing's actually changed. Otherwise it fetches every
+    chunk in order, concatenates, and JSON.parses the result exactly
+    like the old single-bin flow did. cloudSync{apiKey,binId} still
+    refers to the manifest bin's ID everywhere else in the app
+    (createCloudBinAndConnect, saveCloudConfigAndConnect, the Sync
+    modal's Bin ID field) — no changes needed there, chunking is
+    entirely internal to these three functions.
 - 2026-09-03 (later still): Two per-user requests:
     1. ALPHABETICAL SORT — renderCol() now sorts each column's cards by
        item.type (localeCompare, case-insensitive) instead of reverse-
@@ -2189,11 +2231,30 @@ async function saveCloudConfigAndConnect(){
   }
 }
 
+function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
+
+// Wraps fetch with automatic retry on 429 (rate limit) — waits for the
+// server's Retry-After header if present, otherwise backs off 1s/2s/4s.
+// jsonbin's free tier has a generous total request budget but still
+// rate-limits how FAST requests can arrive back-to-back, which a chunked
+// sync (many requests per save) can trip without this.
+async function fetchWithRetry(url, opts, maxRetries){
+  maxRetries = maxRetries || 3;
+  for(let attempt = 0; attempt <= maxRetries; attempt++){
+    const res = await fetch(url, opts);
+    if(res.status !== 429) return res;
+    if(attempt === maxRetries) return res;
+    const retryAfterHeader = res.headers.get('Retry-After');
+    const waitMs = retryAfterHeader ? parseFloat(retryAfterHeader) * 1000 : Math.pow(2, attempt) * 1000;
+    await sleep(waitMs);
+  }
+}
+
 async function pullFromCloud(showBusy){
   if(!cloudSync.apiKey || !cloudSync.binId) return false;
   try{
     if(showBusy) setSyncStatus('syncing');
-    const manifestRes = await fetch('https://api.jsonbin.io/v3/b/' + cloudSync.binId + '/latest', {
+    const manifestRes = await fetchWithRetry('https://api.jsonbin.io/v3/b/' + cloudSync.binId + '/latest', {
       headers: { 'X-Master-Key': cloudSync.apiKey }
     });
     if(!manifestRes.ok) throw new Error('HTTP ' + manifestRes.status);
@@ -2215,12 +2276,13 @@ async function pullFromCloud(showBusy){
 
     let full = '';
     for(const chunkId of chunkBinIds){
-      const chunkRes = await fetch('https://api.jsonbin.io/v3/b/' + chunkId + '/latest', {
+      const chunkRes = await fetchWithRetry('https://api.jsonbin.io/v3/b/' + chunkId + '/latest', {
         headers: { 'X-Master-Key': cloudSync.apiKey }
       });
       if(!chunkRes.ok) throw new Error('HTTP ' + chunkRes.status);
       const chunkData = await chunkRes.json();
       full += chunkData.record.data || '';
+      await sleep(350); // pace requests so we don't trip jsonbin's burst rate limit
     }
 
     const remote = JSON.parse(full);
@@ -2252,7 +2314,7 @@ async function pushToCloud(){
     // to overwrite, rather than trusting a possibly-stale local list.
     let existingIds = [];
     try{
-      const manifestRes = await fetch('https://api.jsonbin.io/v3/b/' + cloudSync.binId + '/latest', {
+      const manifestRes = await fetchWithRetry('https://api.jsonbin.io/v3/b/' + cloudSync.binId + '/latest', {
         headers: { 'X-Master-Key': cloudSync.apiKey }
       });
       if(manifestRes.ok){
@@ -2271,7 +2333,7 @@ async function pushToCloud(){
     for(let i = 0; i < chunks.length; i++){
       const body = JSON.stringify({ data: chunks[i] });
       if(existingIds[i]){
-        const res = await fetch('https://api.jsonbin.io/v3/b/' + existingIds[i], {
+        const res = await fetchWithRetry('https://api.jsonbin.io/v3/b/' + existingIds[i], {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json', 'X-Master-Key': cloudSync.apiKey },
           body
@@ -2279,7 +2341,7 @@ async function pushToCloud(){
         if(!res.ok) throw new Error('HTTP ' + res.status);
         newChunkIds.push(existingIds[i]);
       } else {
-        const res = await fetch('https://api.jsonbin.io/v3/b', {
+        const res = await fetchWithRetry('https://api.jsonbin.io/v3/b', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-Master-Key': cloudSync.apiKey, 'X-Bin-Name': 'oak-joinery-dispatch-board-chunk-' + i },
           body
@@ -2288,20 +2350,22 @@ async function pushToCloud(){
         const data = await res.json();
         newChunkIds.push(data.metadata.id);
       }
+      await sleep(350); // pace requests so we don't trip jsonbin's burst rate limit
     }
 
     // board shrank since the last push — clean up now-unused chunk bins
     for(let i = chunks.length; i < existingIds.length; i++){
       try{
-        await fetch('https://api.jsonbin.io/v3/b/' + existingIds[i], {
+        await fetchWithRetry('https://api.jsonbin.io/v3/b/' + existingIds[i], {
           method: 'DELETE',
           headers: { 'X-Master-Key': cloudSync.apiKey }
         });
+        await sleep(350);
       } catch(e){}
     }
 
     const updatedAt = Date.now();
-    const manifestPutRes = await fetch('https://api.jsonbin.io/v3/b/' + cloudSync.binId, {
+    const manifestPutRes = await fetchWithRetry('https://api.jsonbin.io/v3/b/' + cloudSync.binId, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', 'X-Master-Key': cloudSync.apiKey },
       body: JSON.stringify({ manifest: true, chunkBinIds: newChunkIds, chunkCount: chunks.length, updatedAt })
@@ -2322,7 +2386,7 @@ async function createSharedBin(apiKey){
   // in one jsonbin record (over the 100KB free-tier cap), so it's chunked
   // across separate bins tracked by this manifest. pushToCloud() (queued
   // right after this via save()) fills in the real chunk IDs.
-  const res = await fetch('https://api.jsonbin.io/v3/b', {
+  const res = await fetchWithRetry('https://api.jsonbin.io/v3/b', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Master-Key': apiKey, 'X-Bin-Name': 'oak-joinery-dispatch-board-manifest' },
     body: JSON.stringify({ manifest: true, chunkBinIds: [], chunkCount: 0 })
