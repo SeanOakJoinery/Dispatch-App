@@ -799,7 +799,8 @@ let tokenClient = null;
 let cloudSync = { apiKey: '', binId: '' }; // jsonbin.io — board data sync, independent of Drive
 let cloudSyncStatus = 'disconnected'; // disconnected|syncing|connected|error
 let cloudSyncTimer = null;
-let cloudPollTimer = null;
+let cloudPollTimer = null;const CHUNK_SIZE = 60000; // chars per chunk — keeps each chunk bin safely under jsonbin's 100KB free-tier cap after JSON-escaping overhead
+let cloudLastUpdatedAt = 0; // tracks the last-seen manifest timestamp, so idle polls skip re-downloading chunks that haven't changed
 
 // Users & permissions — client-side only (not a real security boundary,
 // see dev notes). Root always has every permission regardless of the
@@ -2151,7 +2152,7 @@ async function createCloudBinAndConnect(){
   btn.disabled = true;
   try{
     const binId = await createSharedBin(apiKey);
-    cloudSync = { apiKey, binId };
+    cloudSync = { apiKey, binId, chunkBinIds: [] };
     document.getElementById('syncBinIdInput').value = binId;
     save();
     setSyncStatus('connected');
@@ -2192,12 +2193,37 @@ async function pullFromCloud(showBusy){
   if(!cloudSync.apiKey || !cloudSync.binId) return false;
   try{
     if(showBusy) setSyncStatus('syncing');
-    const res = await fetch('https://api.jsonbin.io/v3/b/' + cloudSync.binId + '/latest', {
+    const manifestRes = await fetch('https://api.jsonbin.io/v3/b/' + cloudSync.binId + '/latest', {
       headers: { 'X-Master-Key': cloudSync.apiKey }
     });
-    if(!res.ok) throw new Error('HTTP ' + res.status);
-    const data = await res.json();
-    const remote = data.record;
+    if(!manifestRes.ok) throw new Error('HTTP ' + manifestRes.status);
+    const manifestData = await manifestRes.json();
+    const chunkBinIds = Array.isArray(manifestData.record.chunkBinIds) ? manifestData.record.chunkBinIds : [];
+    const manifestUpdatedAt = manifestData.record.updatedAt || 0;
+
+    // Nothing changed since we last actually pulled this data — skip the
+    // expensive per-chunk fetch and save the request budget for when it matters.
+    if(manifestUpdatedAt && manifestUpdatedAt === cloudLastUpdatedAt){
+      setSyncStatus('connected');
+      return true;
+    }
+
+    if(chunkBinIds.length === 0){
+      setSyncStatus('connected');
+      return true; // nothing pushed from any device yet
+    }
+
+    let full = '';
+    for(const chunkId of chunkBinIds){
+      const chunkRes = await fetch('https://api.jsonbin.io/v3/b/' + chunkId + '/latest', {
+        headers: { 'X-Master-Key': cloudSync.apiKey }
+      });
+      if(!chunkRes.ok) throw new Error('HTTP ' + chunkRes.status);
+      const chunkData = await chunkRes.json();
+      full += chunkData.record.data || '';
+    }
+
+    const remote = JSON.parse(full);
     if(remote && Array.isArray(remote.items)){
       state.items = remote.items || [];
       state.notes = remote.notes || [];
@@ -2210,6 +2236,7 @@ async function pullFromCloud(showBusy){
       applyPermissionsToUi();
       await persistLocal();
     }
+    cloudLastUpdatedAt = manifestUpdatedAt;
     setSyncStatus('connected');
     return true;
   } catch(e){
@@ -2221,13 +2248,67 @@ async function pullFromCloud(showBusy){
 async function pushToCloud(){
   if(!cloudSync.apiKey || !cloudSync.binId) return false;
   try{
+    // Read the current manifest first so we know which existing chunk bins
+    // to overwrite, rather than trusting a possibly-stale local list.
+    let existingIds = [];
+    try{
+      const manifestRes = await fetch('https://api.jsonbin.io/v3/b/' + cloudSync.binId + '/latest', {
+        headers: { 'X-Master-Key': cloudSync.apiKey }
+      });
+      if(manifestRes.ok){
+        const manifestData = await manifestRes.json();
+        if(Array.isArray(manifestData.record.chunkBinIds)) existingIds = manifestData.record.chunkBinIds;
+      }
+    } catch(e){ /* fall through and just create fresh chunk bins */ }
+
     const content = { items: state.items, notes: state.notes, nextNo, itemTypes, users };
-    const res = await fetch('https://api.jsonbin.io/v3/b/' + cloudSync.binId, {
+    const full = JSON.stringify(content);
+    const chunks = [];
+    for(let i = 0; i < full.length; i += CHUNK_SIZE) chunks.push(full.slice(i, i + CHUNK_SIZE));
+    if(chunks.length === 0) chunks.push('');
+
+    const newChunkIds = [];
+    for(let i = 0; i < chunks.length; i++){
+      const body = JSON.stringify({ data: chunks[i] });
+      if(existingIds[i]){
+        const res = await fetch('https://api.jsonbin.io/v3/b/' + existingIds[i], {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', 'X-Master-Key': cloudSync.apiKey },
+          body
+        });
+        if(!res.ok) throw new Error('HTTP ' + res.status);
+        newChunkIds.push(existingIds[i]);
+      } else {
+        const res = await fetch('https://api.jsonbin.io/v3/b', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Master-Key': cloudSync.apiKey, 'X-Bin-Name': 'oak-joinery-dispatch-board-chunk-' + i },
+          body
+        });
+        if(!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        newChunkIds.push(data.metadata.id);
+      }
+    }
+
+    // board shrank since the last push — clean up now-unused chunk bins
+    for(let i = chunks.length; i < existingIds.length; i++){
+      try{
+        await fetch('https://api.jsonbin.io/v3/b/' + existingIds[i], {
+          method: 'DELETE',
+          headers: { 'X-Master-Key': cloudSync.apiKey }
+        });
+      } catch(e){}
+    }
+
+    const updatedAt = Date.now();
+    const manifestPutRes = await fetch('https://api.jsonbin.io/v3/b/' + cloudSync.binId, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', 'X-Master-Key': cloudSync.apiKey },
-      body: JSON.stringify(content)
+      body: JSON.stringify({ manifest: true, chunkBinIds: newChunkIds, chunkCount: chunks.length, updatedAt })
     });
-    if(!res.ok) throw new Error('HTTP ' + res.status);
+    if(!manifestPutRes.ok) throw new Error('HTTP ' + manifestPutRes.status);
+
+    cloudLastUpdatedAt = updatedAt; // this device just wrote this version, so its own next poll can skip re-downloading it
     setSyncStatus('connected');
     return true;
   } catch(e){
@@ -2237,11 +2318,14 @@ async function pushToCloud(){
 }
 
 async function createSharedBin(apiKey){
-  const content = { items: state.items, notes: state.notes, nextNo, itemTypes, users };
+  // Creates an empty "manifest" bin only — the real board data no longer fits
+  // in one jsonbin record (over the 100KB free-tier cap), so it's chunked
+  // across separate bins tracked by this manifest. pushToCloud() (queued
+  // right after this via save()) fills in the real chunk IDs.
   const res = await fetch('https://api.jsonbin.io/v3/b', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Master-Key': apiKey, 'X-Bin-Name': 'oak-joinery-dispatch-board' },
-    body: JSON.stringify(content)
+    headers: { 'Content-Type': 'application/json', 'X-Master-Key': apiKey, 'X-Bin-Name': 'oak-joinery-dispatch-board-manifest' },
+    body: JSON.stringify({ manifest: true, chunkBinIds: [], chunkCount: 0 })
   });
   if(!res.ok) throw new Error('HTTP ' + res.status);
   const data = await res.json();
