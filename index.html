@@ -17,6 +17,48 @@ batched up later. Also update the relevant reference section below
 ========================================================================
 CHANGELOG (most recent first — add a new dated entry after every change)
 ========================================================================
+- 2026-09-07 (later still, #6): Swapped which screen is the DEFAULT on a
+  fresh device (empty local users[]), per user request. Previously
+  "Set up root account" was the default and "Connect instead" (login
+  with username+PIN) was a small link at the bottom — now flipped:
+  showLoginScreen() calls showConnectExistingBoard() directly when
+  users.length===0, so a normal user-login screen (title changed from
+  "Connect to existing board" to just "Log in", button from "Connect &
+  log in" to "Log in") is what anyone opening the app on a new device
+  sees first. Root-account creation moved into its own function,
+  showCreateRootAccount() (previously inline in showLoginScreen),
+  reached via a new small link at the bottom of the login screen:
+  "Setting up this board for the very first time? Create root
+  account". showCreateRootAccount()'s own bottom link ("Already have a
+  board set up on another device? Connect instead") still points back
+  to showConnectExistingBoard(), so both screens link to each other.
+  Removed the old generic "Back" button from the login screen (it used
+  to return to the root-setup screen, which no longer makes sense now
+  that login is the default landing screen rather than a detour off
+  it) — the "Create root account" link serves that navigational
+  purpose instead. Updated connectToExistingBoardFromLogin()'s
+  no-accounts-found error message to reference that link instead of
+  the removed Back button. No changes to createRootAccount() or
+  connectToExistingBoardFromLogin()'s actual logic — this was purely
+  about which screen appears by default.
+- 2026-09-07 (later still, #5): markVinaged() (the "Mark finished"
+  button on Unfinished cards) now supports moving PART of a card's
+  quantity instead of always the whole thing, per user request (e.g.
+  10 Wet Bars unfinished, 1 just got finished — move just that 1,
+  leaving 9 still unfinished). If the card's qty is 1, behaves exactly
+  as before (moves the whole card, no prompt). If qty > 1, prompts
+  "How many ... have you finished?" (same prompt() pattern as
+  removeItem's quantity prompt) defaulting to the full qty so hitting
+  OK with no changes still moves everything — existing single-click
+  workflow for the common case is unchanged. If the entered amount is
+  less than the card's qty, the Unfinished card's qty shrinks by that
+  amount and the moved quantity merges into an existing Finished card
+  of the same type+ref via findMergeTarget('vinaged',...) — same merge
+  rule already used everywhere else (adding stock, Combine duplicates)
+  — or creates a new Finished card for just that quantity if no match
+  exists. The split-off card carries over the original's addedDate
+  (it was added to Unfinished on that date, unaffected by when it
+  later got finished) and gets its own fresh vinagedDate = today.
 - 2026-09-07 (later still, #4): Made the app installable as a PWA
   ("Install app" button), per user request. New files alongside
   index.html: manifest.json (name/icons/start_url/display:standalone,
@@ -1445,8 +1487,44 @@ function markVinaged(id){
   if(!can('moveItems')) return;
   const it = state.items.find(x => x.id === id);
   if(!it) return;
-  it.status = 'vinaged';
-  it.vinagedDate = todayStr();
+
+  let moveQty = it.qty;
+  if(it.qty > 1){
+    const input = prompt(`How many "${it.type}"${it.ref ? ' (' + it.ref + ')' : ''} have you finished? (${it.qty} unfinished)`, String(it.qty));
+    if(input === null) return;
+    const n = parseInt(input);
+    if(!n || n <= 0){
+      alert('Enter a quantity greater than 0.');
+      return;
+    }
+    moveQty = Math.min(n, it.qty);
+  }
+
+  if(moveQty >= it.qty){
+    // Moving the whole card — same as before, just flip its status in place.
+    it.status = 'vinaged';
+    it.vinagedDate = todayStr();
+  } else {
+    // Splitting off part of the quantity: shrink the Unfinished card by
+    // moveQty, and either merge that amount into an existing Finished card
+    // of the same type+ref (findMergeTarget, same merge rule "Combine
+    // duplicates"/adding stock already uses) or create a new Finished card
+    // for just that quantity if none exists yet.
+    it.qty -= moveQty;
+    const existing = findMergeTarget('vinaged', it.type, it.ref);
+    if(existing){
+      existing.qty += moveQty;
+    } else {
+      state.items.push({
+        id: uid(), type: it.type, qty: moveQty, ref: it.ref,
+        status: 'vinaged',
+        addedDate: it.addedDate,
+        vinagedDate: todayStr(),
+        dispatchedDate: null,
+        noteId: null
+      });
+    }
+  }
   save(); render();
 }
 
@@ -2703,24 +2781,13 @@ function showLoginScreen(){
   layer.style.display = 'flex';
 
   if(users.length === 0){
-    layer.innerHTML = `<div class="login-card">
-      <h3>Set up root account</h3>
-      <div class="hint">First time opening this board. Create the main account — it has full access to everything and can add other users afterwards.</div>
-      <div class="field" style="margin-bottom:10px;">
-        <label>Username</label>
-        <input type="text" id="rootUsername" placeholder="e.g. Sean">
-      </div>
-      <div class="field" style="margin-bottom:14px;">
-        <label>PIN (at least 4 characters)</label>
-        <input type="password" id="rootPin" placeholder="••••">
-      </div>
-      <div id="loginErr" style="color:var(--rust);font-size:12px;margin-bottom:10px;display:none;"></div>
-      <button class="btn btn-primary" style="width:100%;" onclick="createRootAccount()">Create root account</button>
-      <div style="text-align:center;margin-top:14px;font-size:12px;color:var(--muted);">
-        Already have a board set up on another device?
-        <button onclick="showConnectExistingBoard()" style="background:none;border:none;color:var(--amber);text-decoration:underline;cursor:pointer;padding:0;font-size:12px;">Connect instead</button>
-      </div>
-    </div>`;
+    // User login is now the DEFAULT view on a fresh device, per user
+    // request — most people opening this app for the first time already
+    // have an account on the real board and just need to log in; only
+    // someone setting up the board for the very first time ever needs
+    // "Create root account", which is now the secondary link at the
+    // bottom instead of the default screen. See showCreateRootAccount().
+    showConnectExistingBoard();
     return;
   }
 
@@ -2728,6 +2795,34 @@ function showLoginScreen(){
     <h3>Who's this?</h3>
     <div class="hint">Pick your name to continue.</div>
     ${users.map(u => `<button class="user-pick-btn" onclick="promptPin('${u.id}')">${escHtml(u.username)}${u.isRoot ? ' (root)' : ''}</button>`).join('')}
+  </div>`;
+}
+
+// The very-first-ever setup screen — creates the board's one-and-only
+// root account. No longer the default view when users[] is empty (see
+// showLoginScreen above); reached via the link at the bottom of the
+// user-login screen instead, since most people opening the app for the
+// first time on a NEW DEVICE already have an account on the real board
+// and want showConnectExistingBoard(), not this.
+function showCreateRootAccount(){
+  const layer = document.getElementById('loginOverlay');
+  layer.innerHTML = `<div class="login-card">
+    <h3>Set up root account</h3>
+    <div class="hint">First time opening this board. Create the main account — it has full access to everything and can add other users afterwards.</div>
+    <div class="field" style="margin-bottom:10px;">
+      <label>Username</label>
+      <input type="text" id="rootUsername" placeholder="e.g. Sean">
+    </div>
+    <div class="field" style="margin-bottom:14px;">
+      <label>PIN (at least 4 characters)</label>
+      <input type="password" id="rootPin" placeholder="••••">
+    </div>
+    <div id="loginErr" style="color:var(--rust);font-size:12px;margin-bottom:10px;display:none;"></div>
+    <button class="btn btn-primary" style="width:100%;" onclick="createRootAccount()">Create root account</button>
+    <div style="text-align:center;margin-top:14px;font-size:12px;color:var(--muted);">
+      Already have a board set up on another device?
+      <button onclick="showConnectExistingBoard()" style="background:none;border:none;color:var(--amber);text-decoration:underline;cursor:pointer;padding:0;font-size:12px;">Connect instead</button>
+    </div>
   </div>`;
 }
 
@@ -2742,9 +2837,11 @@ function showLoginScreen(){
 // (pull BEFORE any save()) for the same reason.
 function showConnectExistingBoard(){
   const layer = document.getElementById('loginOverlay');
+  layer.className = 'login-overlay';
+  layer.style.display = 'flex';
   layer.innerHTML = `<div class="login-card">
-    <h3>Connect to existing board</h3>
-    <div class="hint">Enter your existing username and PIN — this will pull down the real board and log you straight in.</div>
+    <h3>Log in</h3>
+    <div class="hint">Enter your username and PIN — this will pull down the real board and log you straight in.</div>
     <div class="field" style="margin-bottom:10px;">
       <label>Username</label>
       <input type="text" id="loginConnectUsername" placeholder="e.g. Sean">
@@ -2754,8 +2851,11 @@ function showConnectExistingBoard(){
       <input type="password" id="loginConnectPin" placeholder="••••">
     </div>
     <div id="loginErr" style="color:var(--rust);font-size:12px;margin-bottom:10px;display:none;"></div>
-    <button class="btn btn-primary" style="width:100%;margin-bottom:8px;" id="loginConnectBtn" onclick="connectToExistingBoardFromLogin()">Connect &amp; log in</button>
-    <button class="btn" style="width:100%;" onclick="showLoginScreen()">Back</button>
+    <button class="btn btn-primary" style="width:100%;" id="loginConnectBtn" onclick="connectToExistingBoardFromLogin()">Log in</button>
+    <div style="text-align:center;margin-top:14px;font-size:12px;color:var(--muted);">
+      Setting up this board for the very first time?
+      <button onclick="showCreateRootAccount()" style="background:none;border:none;color:var(--amber);text-decoration:underline;cursor:pointer;padding:0;font-size:12px;">Create root account</button>
+    </div>
   </div>`;
   const pinEl = document.getElementById('loginConnectPin');
   pinEl.addEventListener('keydown', (e) => { if(e.key === 'Enter') connectToExistingBoardFromLogin(); });
@@ -2779,7 +2879,7 @@ async function connectToExistingBoardFromLogin(){
   // above showConnectExistingBoard() and the 2026-09-07 changelog entry
   // for why that ordering caused real data loss elsewhere in the app.
   const ok = await pullFromCloud(true);
-  btn.textContent = 'Connect & log in';
+  btn.textContent = 'Log in';
   btn.disabled = false;
   if(!ok){
     err.textContent = 'Could not reach the board — check your internet connection and try again.';
@@ -2787,7 +2887,7 @@ async function connectToExistingBoardFromLogin(){
     return;
   }
   if(users.length === 0){
-    err.textContent = 'Connected, but that board has no accounts set up yet. Use "Back" and "Create root account" instead if this is actually a fresh board.';
+    err.textContent = 'Connected, but that board has no accounts set up yet. Use the "Create root account" link below instead if this is actually a fresh board.';
     err.style.display = 'block';
     return;
   }
