@@ -17,6 +17,23 @@ batched up later. Also update the relevant reference section below
 ========================================================================
 CHANGELOG (most recent first — add a new dated entry after every change)
 ========================================================================
+- 2026-09-07 (later still, #7): Added a "markBuilt" permission
+  (defaultPermissions() + PERMISSION_LABELS, so it shows as a checkbox
+  in Manage users), per user request after discovering the linked
+  Stock List app's "Mark built" button silently disappeared for
+  non-root staff. Root cause: that app's own can('markBuilt') check
+  reads permissions from whatever `users` array it has loaded — and
+  since it now pulls users straight from THIS app's shared board (see
+  the "self-service login/connect" and "same login... with users"
+  changelog entries above), any user's permissions object here that
+  didn't have a markBuilt key at all just evaluated to undefined/false
+  over there. This app itself does nothing with markBuilt (no feature
+  here is gated by it) — the field exists purely to be carried through
+  to the Stock List app for its own gating. Root is unaffected either
+  way (can() always bypasses to true for isRoot). For any existing
+  non-root user who needs this, root has to open Manage users, edit
+  them, tick "Mark stock items as built (Stock List app)", and save —
+  this doesn't retroactively grant itself to anyone.
 - 2026-09-07 (later still, #6): Swapped which screen is the DEFAULT on a
   fresh device (empty local users[]), per user request. Previously
   "Set up root account" was the default and "Connect instead" (login
@@ -1027,7 +1044,14 @@ function defaultPermissions(){
     manageTypes: false,   // Manage items (item catalog)
     exportData: false,    // Download today's sheet, Combine duplicates
     manageSync: false,    // Sync across devices + Google Drive settings
-    manageUsers: false    // Add/edit/remove users (root always has this)
+    manageUsers: false,   // Add/edit/remove users (root always has this)
+    markBuilt: false      // Not used by THIS app — carried here purely so the
+                           // linked Stock List app's "Mark built" button (which
+                           // reads this same permissions object via its own
+                           // can('markBuilt') check, since users/permissions
+                           // are now shared between the two apps) can be
+                           // granted per-person instead of only ever working
+                           // for root. See 2026-09-07 changelog entry.
   };
 }
 
@@ -3070,7 +3094,8 @@ const PERMISSION_LABELS = [
   ['manageTypes', 'Manage item catalog'],
   ['exportData', 'Download sheet / combine duplicates'],
   ['manageSync', 'Manage sync & Google Drive settings'],
-  ['manageUsers', 'Manage users']
+  ['manageUsers', 'Manage users'],
+  ['markBuilt', 'Mark stock items as built (Stock List app)']
 ];
 
 function openManageUsers(editId){
