@@ -17,6 +17,14 @@ batched up later. Also update the relevant reference section below
 ========================================================================
 CHANGELOG (most recent first — add a new dated entry after every change)
 ========================================================================
+- 2026-09-08: Added a "renameCategories" permission (defaultPermissions()
+  + PERMISSION_LABELS), same pattern and same reasoning as markBuilt
+  above — this app does nothing with it itself, it exists purely so the
+  linked Stock List app's "rename category" feature (renames every item
+  in a category at once) can be granted per-person. Originally the
+  Stock List app reused the existing manageTypes permission for this,
+  but per user request it now has its own dedicated permission instead
+  of sharing one — root is unaffected either way (always bypasses).
 - 2026-09-07 (later still, #7): Added a "markBuilt" permission
   (defaultPermissions() + PERMISSION_LABELS, so it shows as a checkbox
   in Manage users), per user request after discovering the linked
@@ -1045,13 +1053,19 @@ function defaultPermissions(){
     exportData: false,    // Download today's sheet, Combine duplicates
     manageSync: false,    // Sync across devices + Google Drive settings
     manageUsers: false,   // Add/edit/remove users (root always has this)
-    markBuilt: false      // Not used by THIS app — carried here purely so the
+    markBuilt: false,     // Not used by THIS app — carried here purely so the
                            // linked Stock List app's "Mark built" button (which
                            // reads this same permissions object via its own
                            // can('markBuilt') check, since users/permissions
                            // are now shared between the two apps) can be
                            // granted per-person instead of only ever working
                            // for root. See 2026-09-07 changelog entry.
+    renameCategories: false // Also not used by THIS app — same reasoning as
+                           // markBuilt above, but for the Stock List app's
+                           // "rename category" feature (renames every item
+                           // in a category at once). Deliberately its own
+                           // permission rather than reusing manageTypes,
+                           // per user request.
   };
 }
 
@@ -3095,7 +3109,8 @@ const PERMISSION_LABELS = [
   ['exportData', 'Download sheet / combine duplicates'],
   ['manageSync', 'Manage sync & Google Drive settings'],
   ['manageUsers', 'Manage users'],
-  ['markBuilt', 'Mark stock items as built (Stock List app)']
+  ['markBuilt', 'Mark stock items as built (Stock List app)'],
+  ['renameCategories', 'Rename stock categories (Stock List app)']
 ];
 
 function openManageUsers(editId){
