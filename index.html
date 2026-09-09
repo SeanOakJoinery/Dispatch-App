@@ -17,6 +17,19 @@ batched up later. Also update the relevant reference section below
 ========================================================================
 CHANGELOG (most recent first — add a new dated entry after every change)
 ========================================================================
+- 2026-09-09: renderCol() was already sorting cards alphabetically by
+  a.type.localeCompare(b.type,...), but plain localeCompare treats
+  embedded numbers character-by-character, not numerically — so e.g.
+  "Aluminium Flat Bar 2813x19" sorted BEFORE "Aluminium Flat Bar
+  854x38" (since '2' < '8' as a character), which is backwards from
+  what anyone would expect. Per user request ("everything running
+  alphabetically and with sizes"), added naturalCompare(a,b) near
+  uid() — splits each string into alternating text/number chunks,
+  compares text chunks case-insensitively and number chunks
+  numerically — and swapped renderCol()'s sort to use it instead.
+  Same fix applied in parallel to the linked Stock List app (which
+  has its own identical copy of this helper, plus its own size field
+  to sort by — see that app's changelog).
 - 2026-09-08: Added a "renameCategories" permission (defaultPermissions()
   + PERMISSION_LABELS), same pattern and same reasoning as markBuilt
   above — this app does nothing with it itself, it exists purely so the
@@ -1147,6 +1160,25 @@ document.getElementById('exportBtn').addEventListener('click', () => exportDaySh
 
 function uid(){ return 'i' + Date.now().toString(36) + Math.random().toString(36).slice(2,7); }
 
+// Natural/alphanumeric sort — compares embedded numbers numerically
+// instead of character-by-character, so "Cleat 854x38" sorts before
+// "Cleat 1562x17" (plain localeCompare would put "1562..." first since
+// '1' < '8' as a character). Per user request: "everything running
+// alphabetically and with sizes". Splits each string into alternating
+// text/number chunks and compares text chunks case-insensitively,
+// number chunks numerically.
+function naturalCompare(a, b){
+  const ax = [], bx = [];
+  String(a || '').replace(/(\d+)|(\D+)/g, (_, num, str) => { ax.push([num ? parseInt(num, 10) : Infinity, str || '']); return ''; });
+  String(b || '').replace(/(\d+)|(\D+)/g, (_, num, str) => { bx.push([num ? parseInt(num, 10) : Infinity, str || '']); return ''; });
+  while(ax.length && bx.length){
+    const an = ax.shift(), bn = bx.shift();
+    const nn = (an[0] - bn[0]) || an[1].localeCompare(bn[1], undefined, {sensitivity: 'base'});
+    if(nn) return nn;
+  }
+  return ax.length - bx.length;
+}
+
 const hasClaudeStorage = typeof window.storage !== 'undefined';
 const localStore = {
   async get(key){
@@ -1319,7 +1351,7 @@ function renderCol(status, list){
     el.innerHTML = '<div class="empty">No stock here</div>';
     return;
   }
-  const sorted = list.slice().sort((a, b) => a.type.localeCompare(b.type, undefined, {sensitivity: 'base'}));
+  const sorted = list.slice().sort((a, b) => naturalCompare(a.type, b.type));
   el.innerHTML = sorted.map(it => cardHtml(it, status)).join('');
 }
 
