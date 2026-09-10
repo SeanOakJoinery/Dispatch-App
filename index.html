@@ -17,6 +17,60 @@ batched up later. Also update the relevant reference section below
 ========================================================================
 CHANGELOG (most recent first — add a new dated entry after every change)
 ========================================================================
+- 2026-09-09 (later): MIGRATED BOARD DATA SYNC FROM jsonbin.io TO
+  FIREBASE REALTIME DATABASE, per user request — jsonbin's free tier
+  is a 10,000-request LIFETIME cap (not daily), which real usage
+  across this app + the linked Stock List app + multiple staff
+  devices + 2-minute polling burned through in a single day of
+  testing. Firebase Spark (free) tier resets DAILY (50k reads/20k
+  writes) and supports genuine real-time listeners instead of
+  polling. Also fixes the underlying cause of the "forced into
+  Create root account on a new device" bug class entirely, rather
+  than working around it.
+  Project: oak-joinery-stock-dispatch (same project shared with the
+  Stock List app — see that app's own changelog for its side of this
+  migration). Realtime Database rules set to open read/write in the
+  Firebase console (same trust model as everyone sharing one jsonbin
+  API key before — not real access control, just staff convenience).
+  Changes:
+    1. Added Firebase compat SDK <script> tags + firebaseConfig +
+       initializeApp() call in <head>. Used compat (non-modular,
+       global `firebase` namespace) deliberately — this file has no
+       bundler and hundreds of lines of existing global functions/
+       variables; compat integrates with zero scoping changes, unlike
+       the modular SDK's ES-module requirements.
+    2. DELETED entirely: cloudSync/DEFAULT_CLOUD_SYNC state,
+       CHUNK_SIZE/cloudLastUpdatedAt, sleep/fetchWithRetry,
+       pullFromCloud/pushToCloud/createSharedBin, queueCloudSync/
+       startCloudPolling, cloudSyncStatus/setSyncStatus, the
+       "Sync across devices" API-key/Bin-ID configuration modal
+       (createCloudBinAndConnect/saveCloudConfigAndConnect), and the
+       "Connect instead" login-screen workaround (showConnectExisting-
+       Board/connectToExistingBoardFromLogin) added on 2026-09-07 —
+       all of this jsonbin-specific machinery is gone.
+    3. ADDED: initFirebaseBoardSync() (called from load(), awaited
+       before checkLogin()) — attaches a live .on('value') listener on
+       'dispatchBoard', resolving its promise on the first snapshot
+       (even if empty) so checkLogin() only ever runs once real data
+       has had a chance to arrive. pushBoardToFirebase()/
+       queuePushToFirebase() replace the old push functions — plain
+       .set() on the same ref, no chunking needed. updateSyncUi()
+       simplified to reflect Firebase's own '.info/connected' special
+       path (firebaseConnected) instead of a manually-tracked status
+       enum. openSyncSettings() is now purely informational (nothing
+       left to configure) and no longer gated by manageSync — see
+       that permission's updated description.
+    4. showLoginScreen()/showCreateRootAccount() reverted to their
+       pre-2026-09-07 simplicity (no "Connect instead" link) — safe
+       to do now that users[] is genuinely always live before this
+       runs.
+    5. save()/persistLocal() no longer persist a sync{apiKey,binId}
+       field locally (nothing to persist — the Firebase config lives
+       in the file itself, not per-device).
+    6. Updated the BOARD DATA SYNC dev-notes section (above) to
+       describe the new architecture; also corrected the stale
+       DEPLOYMENT note (said Netlify, actually on GitHub Pages since
+       partway through this same day's work).
 - 2026-09-09: renderCol() was already sorting cards alphabetically by
   a.type.localeCompare(b.type,...), but plain localeCompare treats
   embedded numbers character-by-character, not numerically — so e.g.
@@ -488,31 +542,51 @@ COMPANY / LETTERHEAD
   Don't revert either back to the old plain-text/underline header.
 
 DEPLOYMENT
-- Deployed as index.html on Netlify: https://chic-torrone-64d20f.netlify.app
-- Also works as a Claude artifact directly (see storage abstraction
-  below). To ship a change: edit this file, user drags the updated
-  index.html onto their existing Netlify project to redeploy.
+- Deployed as index.html on GitHub Pages:
+  https://seanoakjoinery.github.io/Dispatch-App/ (repo:
+  github.com/SeanOakJoinery/Dispatch-App). To ship a change: edit this
+  file, upload it via the repo's "Add file > Upload files" (replaces
+  the existing index.html), commit — GitHub Pages redeploys in 1-2 min.
+  (Previously on Netlify — migrated at some point before 2026-09-07;
+  also still works as a Claude artifact directly, see storage
+  abstraction below.)
 
-BOARD DATA SYNC (jsonbin.io)
-- Live board data (items[], notes[], itemTypes[], nextNo) syncs via
-  jsonbin.io, the same approach used on the separate stock-list app —
-  NOT Google Drive. State: cloudSync = {apiKey, binId}, persisted
-  inside the "board" storage blob alongside items/notes/etc.
-- First device: user pastes their jsonbin API key (X-Master-Key),
-  leaves Bin ID blank, clicks "Create shared store" — createSharedBin()
-  POSTs to jsonbin and returns a Bin ID. Every other device: paste the
-  same API key + that Bin ID, click "Connect".
-- pullFromCloud()/pushToCloud() do GET/PUT against
-  https://api.jsonbin.io/v3/b/{binId}. queueCloudSync() debounces
-  pushToCloud() after save(). startCloudPolling() re-pulls every 2
-  minutes (changed from 20s on 2026-09-03 — 20s per device was way more
-  request volume than jsonbin's free tier easily allows across several
-  staff devices); also re-pulls on window focus. Mirrors the
-  stock-list app's sync functions closely — keep the two in sync if
-  you improve one.
+BOARD DATA SYNC (Firebase Realtime Database)
+- Live board data (items[], notes[], itemTypes[], nextNo, users[])
+  syncs via Firebase Realtime Database — NOT jsonbin.io (migrated
+  2026-09-09, see changelog) and NOT Google Drive. The Firebase project
+  config (apiKey, databaseURL, etc. — see <head>, initializeApp call)
+  is baked directly into this file, same "not a real secret, fine for
+  a single-board internal tool" caveat as the Google Drive Client ID
+  below — Firebase's rules (open read/write, set in the Firebase
+  console's Realtime Database > Rules tab) are what actually gate
+  access, same trust model as everyone sharing one jsonbin API key
+  before.
+- initFirebaseBoardSync() (called from load(), awaited before
+  checkLogin()) attaches a live listener on the 'dispatchBoard' path —
+  fires immediately with whatever's currently there (even if nothing
+  yet) and again instantly whenever ANY device writes. This means
+  users[] is ALWAYS genuinely live by the time the login screen
+  decides between "Who's this?" and "Create root account" — the old
+  jsonbin-era problem of a new device seeing a stale/empty local cache
+  and being wrongly forced into "Create root account" can't happen
+  anymore, which is also why the "Connect instead" login screen from
+  2026-09-07 was removed again as unnecessary.
+- pushBoardToFirebase() does a plain .set() on the same 'dispatchBoard'
+  ref — no chunking (Firestore-style 100KB/1MB limits don't apply the
+  same way here; a single Realtime Database node comfortably holds
+  this board), no manifest, no rate-limit/retry wrapper needed at
+  Firebase's free-tier scale. queuePushToFirebase() debounces this
+  ~800ms after save(), same spirit as the old queueCloudSync.
+- No more polling (startCloudPolling is gone) — the live listener
+  IS the sync; there's nothing to periodically re-pull. Connection
+  status (the toolbar dot/label, "Synced (live)" vs "Reconnecting…")
+  reflects Firebase's own special '.info/connected' path, not a
+  guess.
 - This is separate from and independent of the Google Drive connection
-  below — a device can have jsonbin configured, Drive configured,
-  both, or neither.
+  below — a device can have Drive configured or not; Firebase sync is
+  always-on regardless (it's baked in, not something a device opts
+  into).
 
 GOOGLE DRIVE (PDF archiving only — NOT board data sync)
 - OAuth Client ID (public, safe to reuse):
@@ -714,6 +788,33 @@ WHEN THE USER UPLOADS THIS FILE AGAIN
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<!-- Firebase Realtime Database — replaces the old jsonbin.io sync (see
+     dev notes / changelog for why: jsonbin's free tier is a 10,000
+     request LIFETIME cap, which real usage across two apps + multiple
+     devices + polling burned through in a single day. Firebase's free
+     tier resets DAILY (50k reads/20k writes/day) and supports true
+     real-time listeners instead of 2-minute polling, which also let us
+     delete all the chunking/rate-limit/retry code jsonbin's 100KB
+     per-record limit had forced on us. Using the "compat" SDK
+     (non-modular, global `firebase` namespace) via plain <script> tags
+     deliberately — this file has no bundler and hundreds of lines of
+     existing global functions/variables; compat mode integrates with
+     zero changes to that structure, unlike the modular SDK which
+     requires ES module scoping. -->
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-database-compat.js"></script>
+<script>
+  const firebaseConfig = {
+    apiKey: "AIzaSyCkoUkLIlxdxD2AAEpLGW4dzqkSeC5lVh0",
+    authDomain: "oak-joinery-stock-dispatch.firebaseapp.com",
+    databaseURL: "https://oak-joinery-stock-dispatch-default-rtdb.europe-west1.firebasedatabase.app",
+    projectId: "oak-joinery-stock-dispatch",
+    storageBucket: "oak-joinery-stock-dispatch.firebasestorage.app",
+    messagingSenderId: "538461584463",
+    appId: "1:538461584463:web:b84319c125e9bf9a47be3a"
+  };
+  firebase.initializeApp(firebaseConfig);
+</script>
 <style>
   :root{
     --bg:#1E1C18; --panel:#26221C; --panel-2:#2E2A22; --line:#433D32;
@@ -1031,24 +1132,10 @@ let nextNo = 1;
 let drive = { clientId: '', status: 'disconnected' }; // status: disconnected|connected|syncing|error — Drive is used ONLY for PDF archiving, see dev notes
 let driveAccessToken = null;
 let tokenClient = null;
-let cloudSync = { apiKey: '', binId: '' }; // jsonbin.io — board data sync, independent of Drive
-
-// Fixed jsonbin credentials for THIS board, baked in so a brand-new device
-// can "Connect instead" at first launch using just a username + PIN rather
-// than needing someone to know/paste the API key and Bin ID by hand. Same
-// caveat as the Google Drive Client ID above: visible to anyone who views
-// page source, not a real secret — fine for staff convenience on a
-// single-board internal tool, not for anything with real access-control
-// stakes. If this board's API key or Bin ID ever changes (e.g. rotating
-// the jsonbin key), update both values here.
-const DEFAULT_CLOUD_SYNC = {
-  apiKey: '$2a$10$l6JD2KxQKAU7bhxR7mJFAOtoHFmgMxKgUWE0rHo7zLCpC3OzRFzim',
-  binId: '6a9e72e8ffd5d16053e857ef'
-};
-let cloudSyncStatus = 'disconnected'; // disconnected|syncing|connected|error
-let cloudSyncTimer = null;
-let cloudPollTimer = null;const CHUNK_SIZE = 60000; // chars per chunk — keeps each chunk bin safely under jsonbin's 100KB free-tier cap after JSON-escaping overhead
-let cloudLastUpdatedAt = 0; // tracks the last-seen manifest timestamp, so idle polls skip re-downloading chunks that haven't changed
+let firebaseBoardRef = null; // set once Firebase is initialized in load()
+let firebaseFirstSnapshotReceived = false;
+let firebasePushTimer = null; // debounces rapid-fire writes (e.g. typing) into one push
+let firebaseConnected = false; // tracks Firebase's own /.info/connected special path
 
 // Users & permissions — client-side only (not a real security boundary,
 // see dev notes). Root always has every permission regardless of the
@@ -1064,7 +1151,7 @@ function defaultPermissions(){
     manageNotes: false,   // Delivery notes list, review & sign, edit signing details
     manageTypes: false,   // Manage items (item catalog)
     exportData: false,    // Download today's sheet, Combine duplicates
-    manageSync: false,    // Sync across devices + Google Drive settings
+    manageSync: false,    // Google Drive settings (sync itself has no settings anymore — see BOARD DATA SYNC dev notes)
     manageUsers: false,   // Add/edit/remove users (root always has this)
     markBuilt: false,     // Not used by THIS app — carried here purely so the
                            // linked Stock List app's "Mark built" button (which
@@ -1205,10 +1292,6 @@ async function load(){
       if(parsed.drive){
         drive.clientId = parsed.drive.clientId || '';
       }
-      if(parsed.sync){
-        cloudSync.apiKey = parsed.sync.apiKey || '';
-        cloudSync.binId = parsed.sync.binId || '';
-      }
     }
   }catch(e){ }
   renderTypeSelects();
@@ -1216,20 +1299,24 @@ async function load(){
   updateDriveUi();
   if(drive.clientId) tryAutoReconnectDrive();
 
-  updateSyncUi();
-  if(cloudSync.apiKey && cloudSync.binId){
-    await pullFromCloud(true);
-    startCloudPolling();
-  }
-
+  // Firebase is baked into this file (see <head>) so every device
+  // connects automatically — no API key/Bin ID to enter, no "Connect
+  // instead" screen needed. initFirebaseBoardSync() sets up a live
+  // listener that fires immediately with current data (and again
+  // instantly whenever ANY device writes), so by the time checkLogin()
+  // runs, users[] is always genuinely live rather than a possibly-stale
+  // local cache — this is what makes "Create root account" a true
+  // last-resort fallback now instead of something a new device could
+  // hit by mistake.
+  await initFirebaseBoardSync();
   await checkLogin();
 }
 
 async function save(){
   try{
-    await storage.set('board', JSON.stringify({items: state.items, notes: state.notes, nextNo, itemTypes, users, drive: {clientId: drive.clientId}, sync: {apiKey: cloudSync.apiKey, binId: cloudSync.binId}}), false);
+    await storage.set('board', JSON.stringify({items: state.items, notes: state.notes, nextNo, itemTypes, users, drive: {clientId: drive.clientId}}), false);
   }catch(e){ console.error('storage failed', e); }
-  queueCloudSync();
+  queuePushToFirebase();
 }
 
 function renderTypeSelects(){
@@ -2413,283 +2500,100 @@ function updateSyncUi(){
   const dot = document.getElementById('cloudDot');
   const label = document.getElementById('cloudLabel');
   if(!dot || !label) return;
-  dot.className = 'drive-dot' + (cloudSyncStatus === 'connected' ? ' on' : cloudSyncStatus === 'syncing' ? ' syncing' : cloudSyncStatus === 'error' ? ' err' : '');
-  const labels = {
-    disconnected: 'Sync across devices',
-    connected: 'Synced',
-    syncing: 'Syncing…',
-    error: 'Sync error'
-  };
-  label.textContent = labels[cloudSyncStatus] || 'Sync across devices';
+  dot.className = 'drive-dot' + (firebaseConnected ? ' on' : ' err');
+  label.textContent = firebaseConnected ? 'Synced (live)' : 'Reconnecting…';
 }
 
-function setSyncStatus(s){
-  cloudSyncStatus = s;
-  updateSyncUi();
-}
-
+// Clicking the sync status is now purely informational — there is
+// nothing left to configure, since Firebase is baked into the file
+// itself and every device connects automatically. Kept as a modal
+// (rather than deleting the button) so root/staff have somewhere to
+// glance at actual connection state, and so a stale bookmark/habit of
+// clicking "Sync across devices" still does something sensible.
 function openSyncSettings(){
-  if(!can('manageSync')) return;
   const layer = document.getElementById('modalLayer');
-  const connected = cloudSyncStatus === 'connected';
   layer.innerHTML = `<div class="modal-bg" id="syncBg">
     <div class="modal">
       <h3>Sync across devices</h3>
-      <div class="hint">${connected ? 'Connected — the board (items, notes, item types) stays the same on every phone and laptop using this key/Bin ID.' : 'Connect this board to a shared jsonbin.io store so every phone and laptop shows the same items and delivery notes.'}</div>
-      <div class="field">
-        <label>API key (X-Master-Key)</label>
-        <input type="text" id="syncApiKeyInput" placeholder="$2b$10$..." style="width:100%;" value="${cloudSync.apiKey || ''}">
-      </div>
-      <div class="field">
-        <label>Bin ID <span style="font-weight:400;">(blank on first device only)</span></label>
-        <input type="text" id="syncBinIdInput" placeholder="e.g. 66f2a1c4..." style="width:100%;" value="${cloudSync.binId || ''}">
-      </div>
-      <div id="syncErr" style="color:var(--rust);font-size:12px;margin-top:8px;display:none;"></div>
+      <div class="hint">${firebaseConnected ? 'Connected — this board syncs instantly and automatically to every device via Firebase. Nothing to set up.' : 'Not currently connected — check your internet connection. Nothing to configure here; this reconnects automatically.'}</div>
       <div class="modal-actions">
-        <button class="btn" onclick="closeModal()">${connected ? 'Close' : 'Cancel'}</button>
-        <button class="btn" id="syncCreateBtn" onclick="createCloudBinAndConnect()">Create shared store</button>
-        <button class="btn btn-primary" onclick="saveCloudConfigAndConnect()">Connect</button>
+        <button class="btn btn-primary" onclick="closeModal()">Close</button>
       </div>
     </div>
   </div>`;
 }
 
-async function createCloudBinAndConnect(){
-  const apiKey = document.getElementById('syncApiKeyInput').value.trim();
-  const errEl = document.getElementById('syncErr');
-  errEl.style.display = 'none';
-  if(!apiKey){
-    errEl.textContent = 'Enter your API key first.';
-    errEl.style.display = 'block';
-    return;
-  }
-  const btn = document.getElementById('syncCreateBtn');
-  btn.textContent = 'Creating…';
-  btn.disabled = true;
-  try{
-    const binId = await createSharedBin(apiKey);
-    cloudSync = { apiKey, binId, chunkBinIds: [] };
-    document.getElementById('syncBinIdInput').value = binId;
-    save();
-    setSyncStatus('connected');
-    startCloudPolling();
-    errEl.style.display = 'none';
-  } catch(e){
-    errEl.textContent = 'Could not create a shared store — check the API key and try again.';
-    errEl.style.display = 'block';
-  } finally {
-    btn.textContent = 'Create shared store';
-    btn.disabled = false;
-  }
-}
-
-async function saveCloudConfigAndConnect(){
-  const apiKey = document.getElementById('syncApiKeyInput').value.trim();
-  const binId = document.getElementById('syncBinIdInput').value.trim();
-  const errEl = document.getElementById('syncErr');
-  errEl.style.display = 'none';
-  if(!apiKey || !binId){
-    errEl.textContent = 'Enter both the API key and the Bin ID.';
-    errEl.style.display = 'block';
-    return;
-  }
-  cloudSync = { apiKey, binId };
-  // NOTE: deliberately NOT calling save() here. save() queues a debounced
-  // push of the CURRENT (possibly empty, on a fresh device) local state —
-  // if that push fires before pullFromCloud below finishes downloading the
-  // real chunks, it overwrites/deletes the real remote data with the
-  // empty local board. pullFromCloud already calls persistLocal() itself
-  // on success, which writes both the freshly-pulled data AND this
-  // cloudSync object to local storage — so nothing is lost by skipping
-  // save() here, and the destructive race is avoided entirely.
-  const ok = await pullFromCloud(true);
-  if(ok){
-    startCloudPolling();
-    closeModal();
-  } else {
-    errEl.textContent = 'Could not connect — check the API key and Bin ID and try again.';
-    errEl.style.display = 'block';
-  }
-}
-
-function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
-
-// Wraps fetch with automatic retry on 429 (rate limit) — waits for the
-// server's Retry-After header if present, otherwise backs off 1s/2s/4s.
-// jsonbin's free tier has a generous total request budget but still
-// rate-limits how FAST requests can arrive back-to-back, which a chunked
-// sync (many requests per save) can trip without this.
-async function fetchWithRetry(url, opts, maxRetries){
-  maxRetries = maxRetries || 3;
-  for(let attempt = 0; attempt <= maxRetries; attempt++){
-    const res = await fetch(url, opts);
-    if(res.status !== 429) return res;
-    if(attempt === maxRetries) return res;
-    const retryAfterHeader = res.headers.get('Retry-After');
-    const waitMs = retryAfterHeader ? parseFloat(retryAfterHeader) * 1000 : Math.pow(2, attempt) * 1000;
-    await sleep(waitMs);
-  }
-}
-
-async function pullFromCloud(showBusy){
-  if(!cloudSync.apiKey || !cloudSync.binId) return false;
-  try{
-    if(showBusy) setSyncStatus('syncing');
-    const manifestRes = await fetchWithRetry('https://api.jsonbin.io/v3/b/' + cloudSync.binId + '/latest', {
-      headers: { 'X-Master-Key': cloudSync.apiKey }
+// Sets up the live Firebase listener for the shared board. Fires
+// immediately with whatever data currently exists (even if that's
+// nothing yet, on a brand-new board), and again instantly every time
+// ANY device writes — this fully replaces jsonbin's pullFromCloud +
+// 2-minute polling with genuine real-time sync, and there is no
+// per-record size limit here to force chunking the way jsonbin's
+// 100KB free-tier cap did.
+function initFirebaseBoardSync(){
+  return new Promise((resolve) => {
+    firebase.database().ref('.info/connected').on('value', (snap) => {
+      firebaseConnected = snap.val() === true;
+      updateSyncUi();
     });
-    if(!manifestRes.ok) throw new Error('HTTP ' + manifestRes.status);
-    const manifestData = await manifestRes.json();
-    const chunkBinIds = Array.isArray(manifestData.record.chunkBinIds) ? manifestData.record.chunkBinIds : [];
-    const manifestUpdatedAt = manifestData.record.updatedAt || 0;
 
-    // Nothing changed since we last actually pulled this data — skip the
-    // expensive per-chunk fetch and save the request budget for when it matters.
-    if(manifestUpdatedAt && manifestUpdatedAt === cloudLastUpdatedAt){
-      setSyncStatus('connected');
-      return true;
-    }
-
-    if(chunkBinIds.length === 0){
-      setSyncStatus('connected');
-      return true; // nothing pushed from any device yet
-    }
-
-    let full = '';
-    for(const chunkId of chunkBinIds){
-      const chunkRes = await fetchWithRetry('https://api.jsonbin.io/v3/b/' + chunkId + '/latest', {
-        headers: { 'X-Master-Key': cloudSync.apiKey }
-      });
-      if(!chunkRes.ok) throw new Error('HTTP ' + chunkRes.status);
-      const chunkData = await chunkRes.json();
-      full += chunkData.record.data || '';
-      await sleep(350); // pace requests so we don't trip jsonbin's burst rate limit
-    }
-
-    const remote = JSON.parse(full);
-    if(remote && Array.isArray(remote.items)){
-      state.items = remote.items || [];
-      state.notes = remote.notes || [];
-      nextNo = remote.nextNo || nextNo;
-      itemTypes = (remote.itemTypes && remote.itemTypes.length) ? remote.itemTypes : itemTypes;
-      users = Array.isArray(remote.users) ? remote.users : users;
-      renderTypeSelects();
-      render();
-      renderUserBadge();
-      applyPermissionsToUi();
-      await persistLocal();
-    }
-    cloudLastUpdatedAt = manifestUpdatedAt;
-    setSyncStatus('connected');
-    return true;
-  } catch(e){
-    setSyncStatus('error');
-    return false;
-  }
-}
-
-async function pushToCloud(){
-  if(!cloudSync.apiKey || !cloudSync.binId) return false;
-  try{
-    // Read the current manifest first so we know which existing chunk bins
-    // to overwrite, rather than trusting a possibly-stale local list.
-    let existingIds = [];
-    try{
-      const manifestRes = await fetchWithRetry('https://api.jsonbin.io/v3/b/' + cloudSync.binId + '/latest', {
-        headers: { 'X-Master-Key': cloudSync.apiKey }
-      });
-      if(manifestRes.ok){
-        const manifestData = await manifestRes.json();
-        if(Array.isArray(manifestData.record.chunkBinIds)) existingIds = manifestData.record.chunkBinIds;
+    firebaseBoardRef = firebase.database().ref('dispatchBoard');
+    firebaseBoardRef.on('value', (snapshot) => {
+      const remote = snapshot.val();
+      if(remote){
+        state.items = remote.items || [];
+        state.notes = remote.notes || [];
+        nextNo = remote.nextNo || nextNo;
+        itemTypes = (remote.itemTypes && remote.itemTypes.length) ? remote.itemTypes : itemTypes;
+        users = Array.isArray(remote.users) ? remote.users : users;
+        if(remote.drive) drive.clientId = remote.drive.clientId || drive.clientId;
+        renderTypeSelects();
+        render();
+        renderUserBadge();
+        applyPermissionsToUi();
+        persistLocal();
       }
-    } catch(e){ /* fall through and just create fresh chunk bins */ }
-
-    const content = { items: state.items, notes: state.notes, nextNo, itemTypes, users };
-    const full = JSON.stringify(content);
-    const chunks = [];
-    for(let i = 0; i < full.length; i += CHUNK_SIZE) chunks.push(full.slice(i, i + CHUNK_SIZE));
-    if(chunks.length === 0) chunks.push('');
-
-    const newChunkIds = [];
-    for(let i = 0; i < chunks.length; i++){
-      const body = JSON.stringify({ data: chunks[i] });
-      if(existingIds[i]){
-        const res = await fetchWithRetry('https://api.jsonbin.io/v3/b/' + existingIds[i], {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json', 'X-Master-Key': cloudSync.apiKey },
-          body
-        });
-        if(!res.ok) throw new Error('HTTP ' + res.status);
-        newChunkIds.push(existingIds[i]);
-      } else {
-        const res = await fetchWithRetry('https://api.jsonbin.io/v3/b', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Master-Key': cloudSync.apiKey, 'X-Bin-Name': 'oak-joinery-dispatch-board-chunk-' + i },
-          body
-        });
-        if(!res.ok) throw new Error('HTTP ' + res.status);
-        const data = await res.json();
-        newChunkIds.push(data.metadata.id);
+      if(!firebaseFirstSnapshotReceived){
+        firebaseFirstSnapshotReceived = true;
+        resolve();
       }
-      await sleep(350); // pace requests so we don't trip jsonbin's burst rate limit
-    }
-
-    // board shrank since the last push — clean up now-unused chunk bins
-    for(let i = chunks.length; i < existingIds.length; i++){
-      try{
-        await fetchWithRetry('https://api.jsonbin.io/v3/b/' + existingIds[i], {
-          method: 'DELETE',
-          headers: { 'X-Master-Key': cloudSync.apiKey }
-        });
-        await sleep(350);
-      } catch(e){}
-    }
-
-    const updatedAt = Date.now();
-    const manifestPutRes = await fetchWithRetry('https://api.jsonbin.io/v3/b/' + cloudSync.binId, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json', 'X-Master-Key': cloudSync.apiKey },
-      body: JSON.stringify({ manifest: true, chunkBinIds: newChunkIds, chunkCount: chunks.length, updatedAt })
+    }, () => {
+      // permission-denied or similar — don't hang load() forever waiting
+      if(!firebaseFirstSnapshotReceived){
+        firebaseFirstSnapshotReceived = true;
+        resolve();
+      }
     });
-    if(!manifestPutRes.ok) throw new Error('HTTP ' + manifestPutRes.status);
-
-    cloudLastUpdatedAt = updatedAt; // this device just wrote this version, so its own next poll can skip re-downloading it
-    setSyncStatus('connected');
-    return true;
-  } catch(e){
-    setSyncStatus('error');
-    return false;
-  }
-}
-
-async function createSharedBin(apiKey){
-  // Creates an empty "manifest" bin only — the real board data no longer fits
-  // in one jsonbin record (over the 100KB free-tier cap), so it's chunked
-  // across separate bins tracked by this manifest. pushToCloud() (queued
-  // right after this via save()) fills in the real chunk IDs.
-  const res = await fetchWithRetry('https://api.jsonbin.io/v3/b', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Master-Key': apiKey, 'X-Bin-Name': 'oak-joinery-dispatch-board-manifest' },
-    body: JSON.stringify({ manifest: true, chunkBinIds: [], chunkCount: 0 })
   });
-  if(!res.ok) throw new Error('HTTP ' + res.status);
-  const data = await res.json();
-  return data.metadata.id;
 }
 
-function queueCloudSync(){
-  if(!cloudSync.apiKey || !cloudSync.binId) return;
-  clearTimeout(cloudSyncTimer);
-  cloudSyncTimer = setTimeout(pushToCloud, 800);
+function pushBoardToFirebase(){
+  if(!firebaseBoardRef) return;
+  firebaseBoardRef.set({
+    items: state.items,
+    notes: state.notes,
+    nextNo,
+    itemTypes,
+    users,
+    drive: { clientId: drive.clientId }
+  }).then(() => {
+    firebaseConnected = true;
+    updateSyncUi();
+  }).catch(() => {
+    firebaseConnected = false;
+    updateSyncUi();
+  });
 }
 
-function startCloudPolling(){
-  if(cloudPollTimer) clearInterval(cloudPollTimer);
-  if(!cloudSync.apiKey || !cloudSync.binId) return;
-  cloudPollTimer = setInterval(() => pullFromCloud(false), 120000); // every 2 minutes
+// Debounces rapid-fire saves (e.g. typing in a field that autosaves on
+// every keystroke) into a single write ~800ms after the last change,
+// same spirit as the old jsonbin queueCloudSync but without any of the
+// rate-limit concerns that required — Firebase's free tier is nowhere
+// near a constraint at this app's scale.
+function queuePushToFirebase(){
+  clearTimeout(firebasePushTimer);
+  firebasePushTimer = setTimeout(pushBoardToFirebase, 800);
 }
-
-window.addEventListener('focus', () => { if(cloudSync.apiKey && cloudSync.binId) pullFromCloud(false); });
 
 async function driveApiFetch(url, options){
   options = options || {};
@@ -2851,13 +2755,14 @@ function showLoginScreen(){
   layer.style.display = 'flex';
 
   if(users.length === 0){
-    // User login is now the DEFAULT view on a fresh device, per user
-    // request — most people opening this app for the first time already
-    // have an account on the real board and just need to log in; only
-    // someone setting up the board for the very first time ever needs
-    // "Create root account", which is now the secondary link at the
-    // bottom instead of the default screen. See showCreateRootAccount().
-    showConnectExistingBoard();
+    // Genuinely the very first time this board has ever been opened by
+    // anyone, anywhere — Firebase has already delivered whatever real
+    // data exists by the time this runs (see initFirebaseBoardSync in
+    // load()), so an empty users[] here means the board itself is
+    // truly new, not just "this device hasn't synced yet". The old
+    // "Connect instead" workaround for that latter case is gone since
+    // it can no longer happen.
+    showCreateRootAccount();
     return;
   }
 
@@ -2868,12 +2773,6 @@ function showLoginScreen(){
   </div>`;
 }
 
-// The very-first-ever setup screen — creates the board's one-and-only
-// root account. No longer the default view when users[] is empty (see
-// showLoginScreen above); reached via the link at the bottom of the
-// user-login screen instead, since most people opening the app for the
-// first time on a NEW DEVICE already have an account on the real board
-// and want showConnectExistingBoard(), not this.
 function showCreateRootAccount(){
   const layer = document.getElementById('loginOverlay');
   layer.innerHTML = `<div class="login-card">
@@ -2889,93 +2788,7 @@ function showCreateRootAccount(){
     </div>
     <div id="loginErr" style="color:var(--rust);font-size:12px;margin-bottom:10px;display:none;"></div>
     <button class="btn btn-primary" style="width:100%;" onclick="createRootAccount()">Create root account</button>
-    <div style="text-align:center;margin-top:14px;font-size:12px;color:var(--muted);">
-      Already have a board set up on another device?
-      <button onclick="showConnectExistingBoard()" style="background:none;border:none;color:var(--amber);text-decoration:underline;cursor:pointer;padding:0;font-size:12px;">Connect instead</button>
-    </div>
   </div>`;
-}
-
-// Lets a brand-new device (empty local users[]) skip creating a whole new
-// root account and instead pull down the REAL board — including the real
-// users[] — from an already-connected device's jsonbin sync, so the
-// person can log in with their existing account instead of accidentally
-// starting a second, disconnected board. See dev notes changelog
-// (2026-09-07, "self-service login/connect at first launch") for the
-// data-loss bug this was added alongside — connectToExistingBoardFromLogin
-// below deliberately mirrors saveCloudConfigAndConnect's fixed ordering
-// (pull BEFORE any save()) for the same reason.
-function showConnectExistingBoard(){
-  const layer = document.getElementById('loginOverlay');
-  layer.className = 'login-overlay';
-  layer.style.display = 'flex';
-  layer.innerHTML = `<div class="login-card">
-    <h3>Log in</h3>
-    <div class="hint">Enter your username and PIN — this will pull down the real board and log you straight in.</div>
-    <div class="field" style="margin-bottom:10px;">
-      <label>Username</label>
-      <input type="text" id="loginConnectUsername" placeholder="e.g. Sean">
-    </div>
-    <div class="field" style="margin-bottom:14px;">
-      <label>PIN</label>
-      <input type="password" id="loginConnectPin" placeholder="••••">
-    </div>
-    <div id="loginErr" style="color:var(--rust);font-size:12px;margin-bottom:10px;display:none;"></div>
-    <button class="btn btn-primary" style="width:100%;" id="loginConnectBtn" onclick="connectToExistingBoardFromLogin()">Log in</button>
-    <div style="text-align:center;margin-top:14px;font-size:12px;color:var(--muted);">
-      Setting up this board for the very first time?
-      <button onclick="showCreateRootAccount()" style="background:none;border:none;color:var(--amber);text-decoration:underline;cursor:pointer;padding:0;font-size:12px;">Create root account</button>
-    </div>
-  </div>`;
-  const pinEl = document.getElementById('loginConnectPin');
-  pinEl.addEventListener('keydown', (e) => { if(e.key === 'Enter') connectToExistingBoardFromLogin(); });
-}
-
-async function connectToExistingBoardFromLogin(){
-  const username = document.getElementById('loginConnectUsername').value.trim();
-  const pin = document.getElementById('loginConnectPin').value;
-  const err = document.getElementById('loginErr');
-  err.style.display = 'none';
-  if(!username || !pin){
-    err.textContent = 'Enter both your username and PIN.';
-    err.style.display = 'block';
-    return;
-  }
-  const btn = document.getElementById('loginConnectBtn');
-  btn.textContent = 'Connecting…';
-  btn.disabled = true;
-  cloudSync = { apiKey: DEFAULT_CLOUD_SYNC.apiKey, binId: DEFAULT_CLOUD_SYNC.binId };
-  // Deliberately no save()/persist call before this pull — see the note
-  // above showConnectExistingBoard() and the 2026-09-07 changelog entry
-  // for why that ordering caused real data loss elsewhere in the app.
-  const ok = await pullFromCloud(true);
-  btn.textContent = 'Log in';
-  btn.disabled = false;
-  if(!ok){
-    err.textContent = 'Could not reach the board — check your internet connection and try again.';
-    err.style.display = 'block';
-    return;
-  }
-  if(users.length === 0){
-    err.textContent = 'Connected, but that board has no accounts set up yet. Use the "Create root account" link below instead if this is actually a fresh board.';
-    err.style.display = 'block';
-    return;
-  }
-  const match = users.find(u => u.username.toLowerCase() === username.toLowerCase());
-  const enteredHash = await hashPin(pin);
-  if(!match || enteredHash !== match.pin){
-    err.textContent = 'Incorrect username or PIN.';
-    err.style.display = 'block';
-    return;
-  }
-  currentUserId = match.id;
-  try{ await storage.set('currentUserId', match.id, false); }catch(e){}
-  startCloudPolling();
-  updateSyncUi();
-  hideLoginOverlay();
-  renderUserBadge();
-  applyPermissionsToUi();
-  resetIdleTimer();
 }
 
 function promptPin(userId){
@@ -3126,7 +2939,11 @@ function applyPermissionsToUi(){
   set('exportBtn', can('exportData'));
   set('combineBtn', can('exportData'));
   set('notesBtn', can('manageNotes'));
-  set('syncBtn', can('manageSync'));
+  // syncBtn is now purely a read-only status indicator (Firebase sync
+  // has no settings left to configure — see openSyncSettings), so it's
+  // visible to everyone rather than gated by manageSync like it used
+  // to be when it opened a real API-key/Bin-ID configuration panel.
+  set('syncBtn', true);
   set('driveBtn', can('manageSync'));
   set('manageUsersBtn', can('manageUsers'));
   render();
@@ -3139,7 +2956,7 @@ const PERMISSION_LABELS = [
   ['manageNotes', 'Manage delivery notes (view, sign)'],
   ['manageTypes', 'Manage item catalog'],
   ['exportData', 'Download sheet / combine duplicates'],
-  ['manageSync', 'Manage sync & Google Drive settings'],
+  ['manageSync', 'Manage Google Drive settings'],
   ['manageUsers', 'Manage users'],
   ['markBuilt', 'Mark stock items as built (Stock List app)'],
   ['renameCategories', 'Rename stock categories (Stock List app)']
@@ -3222,7 +3039,13 @@ async function saveUserForm(editId){
     err.style.display = 'block';
     return;
   }
-  const permissions = defaultPermissions();
+  // FIXED 2026-09-09: same fix as the Stock List app's saveUserForm —
+  // start from the existing user's permissions when editing (not a
+  // fresh defaultPermissions()) so any key only the OTHER app's form
+  // shows checkboxes for (there currently are none the other direction,
+  // but this makes it safe either way) isn't silently wiped on save.
+  const existingUser = editId ? users.find(u => u.id === editId) : null;
+  const permissions = existingUser ? {...defaultPermissions(), ...existingUser.permissions} : defaultPermissions();
   document.querySelectorAll('.permCheck').forEach(cb => { permissions[cb.dataset.key] = cb.checked; });
 
   if(editId){
@@ -3263,7 +3086,7 @@ document.getElementById('manageUsersBtn').addEventListener('click', () => openMa
 
 async function persistLocal(){
   try{
-    await storage.set('board', JSON.stringify({items: state.items, notes: state.notes, nextNo, itemTypes, users, drive: {clientId: drive.clientId}, sync: {apiKey: cloudSync.apiKey, binId: cloudSync.binId}}), false);
+    await storage.set('board', JSON.stringify({items: state.items, notes: state.notes, nextNo, itemTypes, users, drive: {clientId: drive.clientId}}), false);
   }catch(e){ console.error('storage failed', e); }
 }
 
