@@ -17,6 +17,25 @@ batched up later. Also update the relevant reference section below
 ========================================================================
 CHANGELOG (most recent first — add a new dated entry after every change)
 ========================================================================
+- 2026-09-11: Added a saved driver roster, per user request ("add
+  driver to it and it stores it underneath... i want that option for
+  root user"). New `drivers` array, synced/persisted alongside
+  itemTypes/users everywhere board data travels (load(), save(),
+  persistLocal(), initFirebaseBoardSync, pushBoardToFirebase). New
+  "Manage drivers" toolbar button — visible to root ONLY
+  (currentUserIsRoot(), a new small helper added next to can()), not a
+  grantable permission like markBuilt/renameCategories, since the user
+  specifically said root for this one. openManageDrivers()/addDriver()/
+  removeDriverAt() mirror the existing openManageTypes()/addItemType()/
+  removeItemTypeAt() pattern exactly. renderDriverOptions() populates a
+  new <datalist id="driverList"> that the three existing driver-name
+  fields (driverNameInput, pendingDriverName, sdDriverName) now
+  reference via list="driverList" — gives everyone autocomplete
+  suggestions from the roster, but typing an unlisted name still works
+  for a one-off/ad-hoc driver, it just doesn't get remembered as a
+  suggestion unless root formally adds it via Manage Drivers. Deciding
+  factor for this design: user wanted adding NEW roster entries
+  root-only, not the act of naming a driver on a note itself.
 - 2026-09-09 (later): MIGRATED BOARD DATA SYNC FROM jsonbin.io TO
   FIREBASE REALTIME DATABASE, per user request — jsonbin's free tier
   is a 10,000-request LIFETIME cap (not daily), which real usage
@@ -1018,6 +1037,7 @@ WHEN THE USER UPLOADS THIS FILE AGAIN
   <button class="btn drive-btn" id="syncBtn"><span class="drive-dot" id="cloudDot"></span><span id="cloudLabel">Sync across devices</span></button>
   <button class="btn drive-btn" id="driveBtn"><span class="drive-dot" id="driveDot"></span><span id="driveLabel">Google Drive</span></button>
   <button class="btn" id="manageTypesBtn">Manage items</button>
+  <button class="btn" id="manageDriversBtn">Manage drivers</button>
   <button class="btn" id="exportBtn">Download today's sheet</button>
   <button class="btn" id="combineBtn">Combine duplicates</button>
   <button class="btn" id="notesBtn">Delivery notes (<span id="notesCount">0</span>)</button>
@@ -1075,6 +1095,7 @@ WHEN THE USER UPLOADS THIS FILE AGAIN
 </div>
 
 <div id="modalLayer"></div>
+<datalist id="driverList"></datalist>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
@@ -1128,6 +1149,15 @@ const DEFAULT_ITEM_TYPES = [
 
 let state = { items: [], notes: [] };
 let itemTypes = DEFAULT_ITEM_TYPES.slice();
+
+// Saved driver roster, per user request: adding a NEW driver to this
+// list is root-only (via "Manage drivers"), but once added, anyone
+// completing a delivery note can pick that name from the datalist
+// suggestions on the driver-name field. Typing an unlisted/one-off
+// name directly into a delivery note still works for everyone (it's
+// just a text field) — it simply won't get remembered as a suggestion
+// for next time unless root formally adds it via Manage drivers.
+let drivers = [];
 let nextNo = 1;
 let drive = { clientId: '', status: 'disconnected' }; // status: disconnected|connected|syncing|error — Drive is used ONLY for PDF archiving, see dev notes
 let driveAccessToken = null;
@@ -1178,6 +1208,11 @@ function can(key){
   if(!u) return false;
   if(u.isRoot) return true;
   return !!(u.permissions && u.permissions[key]);
+}
+
+function currentUserIsRoot(){
+  const u = getCurrentUser();
+  return !!(u && u.isRoot);
 }
 
 function todayStr(){
@@ -1289,12 +1324,14 @@ async function load(){
       nextNo = parsed.nextNo || (state.notes.length + 1);
       itemTypes = (parsed.itemTypes && parsed.itemTypes.length) ? parsed.itemTypes : DEFAULT_ITEM_TYPES.slice();
       users = parsed.users || [];
+      drivers = parsed.drivers || [];
       if(parsed.drive){
         drive.clientId = parsed.drive.clientId || '';
       }
     }
   }catch(e){ }
   renderTypeSelects();
+  renderDriverOptions();
   render();
   updateDriveUi();
   if(drive.clientId) tryAutoReconnectDrive();
@@ -1314,7 +1351,7 @@ async function load(){
 
 async function save(){
   try{
-    await storage.set('board', JSON.stringify({items: state.items, notes: state.notes, nextNo, itemTypes, users, drive: {clientId: drive.clientId}}), false);
+    await storage.set('board', JSON.stringify({items: state.items, notes: state.notes, nextNo, itemTypes, users, drivers, drive: {clientId: drive.clientId}}), false);
   }catch(e){ console.error('storage failed', e); }
   queuePushToFirebase();
 }
@@ -1326,6 +1363,7 @@ function renderTypeSelects(){
 }
 
 document.getElementById('manageTypesBtn').addEventListener('click', openManageTypes);
+document.getElementById('manageDriversBtn').addEventListener('click', openManageDrivers);
 
 function openManageTypes(){
   if(!can('manageTypes')) return;
@@ -1375,6 +1413,69 @@ function removeItemTypeAt(index){
   save();
   renderTypeSelects();
   openManageTypes();
+}
+
+// Driver roster — mirrors the "Manage items" pattern above exactly.
+// Adding is root-only per user request; renderDriverOptions() below
+// populates the <datalist> the actual driver-name fields use, so
+// anyone completing a delivery note gets autocomplete suggestions from
+// whatever root has added, but only root can grow that list.
+function openManageDrivers(){
+  if(!currentUserIsRoot()) return;
+  const layer = document.getElementById('modalLayer');
+  layer.innerHTML = `<div class="modal-bg" id="driversBg">
+    <div class="modal" style="max-width:420px;">
+      <h3>Manage drivers</h3>
+      <div class="hint">Add or remove drivers from the suggestions list on delivery notes. Removing one doesn't affect notes that already have that driver's name saved.</div>
+      <div style="max-height:280px;overflow:auto;display:flex;flex-direction:column;gap:4px;margin-bottom:14px;">
+        ${drivers.map((d, i) => `<div class="note-item-row" style="border-bottom:1px solid var(--line);"><span>${escHtml(d)}</span><button class="rm" onclick="removeDriverAt(${i})" title="Remove">&times;</button></div>`).join('')}
+      </div>
+      <div class="field">
+        <label>New driver name</label>
+        <input type="text" id="newDriverInput" placeholder="e.g. Thabo M." style="width:100%;">
+      </div>
+      <div id="driverErr" style="color:var(--rust);font-size:12px;margin-top:8px;display:none;"></div>
+      <div class="modal-actions">
+        <button class="btn" onclick="closeModal()">Done</button>
+        <button class="btn btn-primary" onclick="addDriver()">Add driver</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function addDriver(){
+  if(!currentUserIsRoot()) return;
+  const input = document.getElementById('newDriverInput');
+  const name = input.value.trim();
+  const err = document.getElementById('driverErr');
+  if(!name){
+    err.textContent = 'Enter a name for the driver';
+    err.style.display = 'block';
+    return;
+  }
+  if(drivers.includes(name)){
+    err.textContent = 'That driver already exists';
+    err.style.display = 'block';
+    return;
+  }
+  drivers.push(name);
+  save();
+  renderDriverOptions();
+  openManageDrivers();
+}
+
+function removeDriverAt(index){
+  if(!currentUserIsRoot()) return;
+  drivers.splice(index, 1);
+  save();
+  renderDriverOptions();
+  openManageDrivers();
+}
+
+function renderDriverOptions(){
+  const list = document.getElementById('driverList');
+  if(!list) return;
+  list.innerHTML = drivers.map(d => `<option value="${escHtml(d)}"></option>`).join('');
 }
 
 function specHtml(type){
@@ -1735,7 +1836,7 @@ function showDispatchModal(){
       </div>
       <div class="field" style="margin-top:12px;">
         <label>Driver name</label>
-        <input type="text" id="driverNameInput" placeholder="e.g. Thabo M." style="width:100%;">
+        <input type="text" id="driverNameInput" list="driverList" placeholder="e.g. Thabo M." style="width:100%;">
       </div>
       <div class="field" style="margin-top:12px;">
         <label>Vehicle registration</label>
@@ -2011,7 +2112,7 @@ function viewNote(noteId){
       ${!note.driverSignature ? `
       <div class="field" style="margin-top:14px;">
         <label>Driver name</label>
-        <input type="text" id="pendingDriverName" placeholder="e.g. Thabo M." style="width:100%;" value="${escHtml(note.driverName || '')}">
+        <input type="text" id="pendingDriverName" list="driverList" placeholder="e.g. Thabo M." style="width:100%;" value="${escHtml(note.driverName || '')}">
       </div>
       <div class="field" style="margin-top:8px;">
         <label>Vehicle registration</label>
@@ -2087,7 +2188,7 @@ function openSigningDetails(noteId){
       <div class="hint">${note.number} — doesn't touch items or the signature images</div>
       <div class="field">
         <label>Driver name</label>
-        <input type="text" id="sdDriverName" style="width:100%;" value="${escHtml(note.driverName || '')}">
+        <input type="text" id="sdDriverName" list="driverList" style="width:100%;" value="${escHtml(note.driverName || '')}">
       </div>
       <div class="field" style="margin-top:12px;">
         <label>Vehicle registration</label>
@@ -2546,8 +2647,10 @@ function initFirebaseBoardSync(){
         nextNo = remote.nextNo || nextNo;
         itemTypes = (remote.itemTypes && remote.itemTypes.length) ? remote.itemTypes : itemTypes;
         users = Array.isArray(remote.users) ? remote.users : users;
+        drivers = Array.isArray(remote.drivers) ? remote.drivers : drivers;
         if(remote.drive) drive.clientId = remote.drive.clientId || drive.clientId;
         renderTypeSelects();
+        renderDriverOptions();
         render();
         renderUserBadge();
         applyPermissionsToUi();
@@ -2575,6 +2678,7 @@ function pushBoardToFirebase(){
     nextNo,
     itemTypes,
     users,
+    drivers,
     drive: { clientId: drive.clientId }
   }).then(() => {
     firebaseConnected = true;
@@ -2936,6 +3040,7 @@ function applyPermissionsToUi(){
   set('addbarFin', can('addItems'));
   set('addbarDis', can('addItems'));
   set('manageTypesBtn', can('manageTypes'));
+  set('manageDriversBtn', currentUserIsRoot());
   set('exportBtn', can('exportData'));
   set('combineBtn', can('exportData'));
   set('notesBtn', can('manageNotes'));
@@ -3086,7 +3191,7 @@ document.getElementById('manageUsersBtn').addEventListener('click', () => openMa
 
 async function persistLocal(){
   try{
-    await storage.set('board', JSON.stringify({items: state.items, notes: state.notes, nextNo, itemTypes, users, drive: {clientId: drive.clientId}}), false);
+    await storage.set('board', JSON.stringify({items: state.items, notes: state.notes, nextNo, itemTypes, users, drivers, drive: {clientId: drive.clientId}}), false);
   }catch(e){ console.error('storage failed', e); }
 }
 
