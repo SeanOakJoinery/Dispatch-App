@@ -17,6 +17,25 @@ batched up later. Also update the relevant reference section below
 ========================================================================
 CHANGELOG (most recent first — add a new dated entry after every change)
 ========================================================================
+- 2026-09-11 (later): Fixed the delivery note header to always show
+  driver info, per user clarification of the driver-roster request
+  above ("i want it so even after i saved it and then put the driver
+  name and reg number in it has to save it on top as well"). Root
+  cause: the driver row under the client "To" row (driverInfoRow) was
+  only rendered BEFORE the driver signed — once note.driverSignature
+  existed, that row was suppressed entirely and the name/reg only
+  appeared bundled into the signature caption text lower down, so
+  info entered/edited afterward via openSigningDetails wasn't reliably
+  visible up top. Replaced with driverRow, which shows unconditionally
+  whenever driverName/vehicleReg/driverSignedDate exist regardless of
+  signature state, laid out as three columns (name left, signed date
+  center, vehicle reg right) per user's exact spec, with a new
+  .docket-driver-row CSS class adding a dividing border-top to visually
+  split it from the client row above. Trimmed the now-redundant
+  name/date text out of the signature caption underneath (driverBlock)
+  since it's shown up top instead. This is the same #printArea div
+  html2canvas screenshots for PDF/Drive/email/WhatsApp, so the fix
+  applies everywhere the docket is rendered, not just on-screen.
 - 2026-09-11: Added a saved driver roster, per user request ("add
   driver to it and it stores it underneath... i want that option for
   root user"). New `drivers` array, synced/persisted alongside
@@ -944,6 +963,10 @@ WHEN THE USER UPLOADS THIS FILE AGAIN
   .docket-row{display:flex;justify-content:space-between;gap:10px;font-size:12px;color:#5A5238;margin-bottom:2px;}
   .docket-row span:first-child{flex-shrink:0;}
   .docket-row span:last-child{text-align:right;overflow-wrap:anywhere;}
+  .docket-driver-row{display:flex;justify-content:space-between;gap:10px;font-size:12px;color:#5A5238;margin:6px 0;padding-top:6px;border-top:1px solid #E3D8C4;}
+  .docket-driver-row span:first-child{text-align:left;}
+  .docket-driver-row span:nth-child(2){text-align:center;color:#8a7f63;}
+  .docket-driver-row span:last-child{text-align:right;}
   .docket-items{margin-top:14px;border-top:1px solid #B9AF93;padding-top:10px;}
   .docket-items-header{display:flex;align-items:center;gap:10px;font-size:10px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:#8a8060;padding-bottom:5px;border-bottom:1px solid #B9AF93;margin-bottom:2px;}
   .docket-items-header .num-col{flex-shrink:0;width:20px;}
@@ -2012,17 +2035,22 @@ function viewNote(noteId){
   const rootOverride = complete && !!(curUser && curUser.isRoot);
   const layer = document.getElementById('modalLayer');
 
-  const driverInfoLine = (note.driverName || note.vehicleReg)
-    ? `${escHtml(note.driverName || '')}${note.driverName && note.vehicleReg ? ' · ' : ''}${note.vehicleReg ? 'Vehicle: ' + escHtml(note.vehicleReg) : ''}`
+  // Per user request: the driver row (name/signed-date/vehicle reg)
+  // must always show right under the client "To" row, split off by a
+  // dividing line — regardless of whether the driver has signed yet.
+  // Previously this only showed BEFORE signing (driverInfoRow was
+  // suppressed once note.driverSignature existed, moving the info down
+  // into the signature caption instead), which is exactly the bug
+  // being fixed: info entered/edited AFTER the initial save (via
+  // openSigningDetails) wasn't reliably visible up top anymore.
+  const driverRow = (note.driverName || note.vehicleReg || note.driverSignedDate)
+    ? `<div class="docket-driver-row"><span>${escHtml(note.driverName || '')}</span><span>${escHtml(note.driverSignedDate || '')}</span><span>${escHtml(note.vehicleReg || '')}</span></div>`
     : '';
   const driverBlock = note.driverSignature
-    ? `<div class="docket-sig"><img src="${note.driverSignature}" alt="Driver signature"><div class="sig-label">Dispatched &amp; signed by driver${driverInfoLine ? ' — ' + driverInfoLine : ''}${note.driverSignedDate ? ' — ' + note.driverSignedDate : ''}</div></div>`
+    ? `<div class="docket-sig"><img src="${note.driverSignature}" alt="Driver signature"><div class="sig-label">Dispatched &amp; signed by driver</div></div>`
     : (note.signature ? `<div class="docket-sig"><img src="${note.signature}" alt="Signature"><div class="sig-label">Received &amp; signed by ${escHtml(note.customer)}${note.date ? ' — ' + escHtml(note.date) : ''}</div></div>` : '');
   const siteBlock = note.siteSignature
     ? `<div class="docket-sig"><img src="${note.siteSignature}" alt="Site signature"><div class="sig-label">Received &amp; signed by ${escHtml(note.siteSignedBy || note.customer)}${note.siteSignedDate ? ' — ' + escHtml(note.siteSignedDate) : ''}</div></div>`
-    : '';
-  const driverInfoRow = (driverInfoLine && !note.driverSignature)
-    ? `<div class="docket-row"><span>Driver</span><span>${driverInfoLine}</span></div>`
     : '';
 
   const editableItems = !complete || rootOverride;
@@ -2056,7 +2084,7 @@ function viewNote(noteId){
           <div class="docket-date">${note.date}</div>
         </div>
         <div class="docket-row"><span>To</span><span>${escHtml(note.customer)}</span></div>
-        ${driverInfoRow}
+        ${driverRow}
         <div class="docket-items">
           ${itemsHeader}
           ${itemLines}
