@@ -17,6 +17,29 @@ batched up later. Also update the relevant reference section below
 ========================================================================
 CHANGELOG (most recent first — add a new dated entry after every change)
 ========================================================================
+- 2026-09-11 (later #3): Added a COLLECTION toggle to the delivery-note
+  modal, per user request ("add a collection toggle that then makes it
+  that i only need 1 signature"). When the client collects the goods
+  themselves there's no driver handover, so the normal two-signature
+  flow (driver loads -> site receives) collapses to one. Ticking the
+  toggle (toggleCollectionMode()) hides the driver name/vehicle reg
+  fields, shows a "Collected by" name field instead, and relabels the
+  signature pad + submit button. submitDispatch() then writes that one
+  signature into siteSignature/siteSignedBy/siteSignedDate (NOT the
+  driver fields) and sets note.isCollection — which matters because
+  isNoteComplete() keys off siteSignature, so the note is complete the
+  moment it's signed and lands under "Delivered" instead of hanging in
+  "Waiting for signature" forever. Knock-on changes to keep everything
+  consistent: render()'s board-hide check now also clears items for a
+  signed collection note (it previously only looked at
+  driverSignature, so collection items would have been stranded in the
+  Dispatched column); viewNote() skips both driver-signature blocks
+  for collection notes and relabels the site signature section;
+  the docket shows a "Collected by: <name> / <date> / Collection" row
+  in place of the Driver row and captions the signature "Collected &
+  signed by"; viewAllNotes()' status hints distinguish collection
+  notes. Existing notes have isCollection undefined, which is falsy —
+  so they all keep behaving exactly as before, no migration needed.
 - 2026-09-11 (later #2): Restructured the board workflow, per user
   request. Three changes, all interlocking:
     1. NEW "READY TO DISPATCH" COLUMN (status 'ready', + readyDate on
@@ -685,9 +708,18 @@ CORE DATA MODEL (persisted as one JSON blob under storage key "board")
   fully complete) — see viewAllNotes' Waiting for signature/Delivered
   split below for where they go from there.
 - state.notes[]: { id, number ('DN-0001'...), date, customer,
-  items: [{stockItemId, type, qty, ref}], driverSignature (dataURL|
+  items: [{stockItemId, type, qty, ref}], isCollection (bool),
+  driverSignature (dataURL|
   null), driverSignedDate, driverName, vehicleReg, siteSignature
-  (dataURL|null), siteSignedDate, siteSignedBy, driveFileId }. Legacy
+  (dataURL|null), siteSignedDate, siteSignedBy, driveFileId }.
+  isCollection (added 2026-09-11) means the client collected the goods
+  themselves — there is no driver leg, so driverSignature/driverName/
+  vehicleReg stay empty and the SINGLE signature captured at dispatch
+  time is written straight into siteSignature/siteSignedBy/
+  siteSignedDate. That makes isNoteComplete() true immediately, which
+  is what takes the items off the board and files the note under
+  "Delivered" rather than leaving it waiting for a second signature
+  that will never come. Legacy
   notes may only have a flat
   `signature` field instead of driver/site — isNoteComplete() and the
   docket renderer both fall back to it; keep that handling.
@@ -1562,9 +1594,11 @@ function render(){
       // items) then shows under "Waiting for signature" in the
       // Delivery Notes list (viewAllNotes) until the site/client also
       // signs, at which point it moves to "Delivered" there.
-      if(note && note.driverSignature){
+      // A collection note has no driver handover, so its single
+      // (site) signature is what takes items off the board.
+      if(note && (note.driverSignature || (note.isCollection && note.siteSignature))){
         archivedCount++;
-        return; // driver has signed — out of the active board, still viewable via "Delivery notes"
+        return; // handed over — out of the active board, still viewable via "Delivery notes"
       }
     }
     cols[it.status].push(it);
@@ -1964,19 +1998,29 @@ function showDispatchModal(){
         <label>Customer / destination</label>
         <input type="text" id="custInput" placeholder="e.g. Acme Motorhomes" style="width:100%;" value="${defaultCustomer.replace(/"/g,'&quot;')}">
       </div>
-      <div class="field" style="margin-top:12px;">
-        <label>Driver name</label>
-        <input type="text" id="driverNameInput" list="driverList" placeholder="e.g. Thabo M." style="width:100%;">
+      <label class="one-off-toggle" style="margin-top:12px;display:flex;align-items:center;gap:8px;">
+        <input type="checkbox" id="collectionToggle" onchange="toggleCollectionMode()">
+        Collection — client collects, one signature only
+      </label>
+      <div id="driverFields">
+        <div class="field" style="margin-top:12px;">
+          <label>Driver name</label>
+          <input type="text" id="driverNameInput" list="driverList" placeholder="e.g. Thabo M." style="width:100%;">
+        </div>
+        <div class="field" style="margin-top:12px;">
+          <label>Vehicle registration</label>
+          <input type="text" id="vehicleRegInput" placeholder="e.g. CA 123-456" style="width:100%;">
+        </div>
+      </div>
+      <div class="field" id="collectorNameField" style="margin-top:12px;display:none;">
+        <label>Collected by</label>
+        <input type="text" id="collectorNameInput" placeholder="Name of person collecting" style="width:100%;">
       </div>
       <div class="field" style="margin-top:12px;">
-        <label>Vehicle registration</label>
-        <input type="text" id="vehicleRegInput" placeholder="e.g. CA 123-456" style="width:100%;">
-      </div>
-      <div class="field" style="margin-top:12px;">
-        <label>Driver signature</label>
+        <label id="sigCanvasLabel">Driver signature</label>
         <div class="sigwrap"><canvas id="sigCanvas"></canvas></div>
         <div class="sig-actions">
-          <span class="sig-hint">Driver signs to confirm items loaded</span>
+          <span class="sig-hint" id="sigCanvasHint">Driver signs to confirm items loaded</span>
           <button type="button" class="btn btn-sm" onclick="clearSignature('sigCanvas')">Clear</button>
         </div>
       </div>
@@ -1984,11 +2028,32 @@ function showDispatchModal(){
       <div class="modal-actions">
         <button class="btn" onclick="closeModal()">Cancel</button>
         <button class="btn" onclick="submitDispatch(false)">Save for now</button>
-        <button class="btn btn-primary" onclick="submitDispatch(true)">Submit driver signature</button>
+        <button class="btn btn-primary" id="dispSubmitBtn" onclick="submitDispatch(true)">Submit driver signature</button>
       </div>
     </div>
   </div>`;
   setupSignaturePad('sigCanvas');
+}
+
+// Collection mode, per user request: when the client collects the goods
+// themselves there's no driver handover, so the two-signature flow
+// (driver loads -> site receives) collapses to a single signature from
+// whoever collects. Swaps the driver name/vehicle fields for a single
+// "Collected by" name, and relabels the signature pad. submitDispatch()
+// then stores that one signature as the SITE signature (not the driver
+// one) so isNoteComplete() is satisfied immediately and the note goes
+// straight to "Delivered" rather than sitting in "Waiting for
+// signature" forever waiting for a second signature that will never
+// come.
+function toggleCollectionMode(){
+  const isCollection = document.getElementById('collectionToggle').checked;
+  document.getElementById('driverFields').style.display = isCollection ? 'none' : '';
+  document.getElementById('collectorNameField').style.display = isCollection ? '' : 'none';
+  document.getElementById('sigCanvasLabel').textContent = isCollection ? 'Collector signature' : 'Driver signature';
+  document.getElementById('sigCanvasHint').textContent = isCollection
+    ? 'Client signs to confirm they collected these items — locks this note'
+    : 'Driver signs to confirm items loaded';
+  document.getElementById('dispSubmitBtn').textContent = isCollection ? 'Submit collection signature' : 'Submit driver signature';
 }
 
 function setupSignaturePad(canvasId){
@@ -2073,15 +2138,18 @@ function submitDispatch(requireDriverSig){
     document.getElementById('dispErr').style.display = 'block';
     return;
   }
-  const driverSignature = getSignatureDataUrl('sigCanvas');
-  if(requireDriverSig && !driverSignature){
+  const collectionToggle = document.getElementById('collectionToggle');
+  const isCollection = !!(collectionToggle && collectionToggle.checked);
+  const capturedSignature = getSignatureDataUrl('sigCanvas');
+  if(requireDriverSig && !capturedSignature){
     const err = document.getElementById('dispErr');
-    err.textContent = 'Driver signature required';
+    err.textContent = isCollection ? 'Collector signature required' : 'Driver signature required';
     err.style.display = 'block';
     return;
   }
-  const driverName = document.getElementById('driverNameInput').value.trim();
-  const vehicleReg = document.getElementById('vehicleRegInput').value.trim();
+  const driverName = isCollection ? '' : document.getElementById('driverNameInput').value.trim();
+  const vehicleReg = isCollection ? '' : document.getElementById('vehicleRegInput').value.trim();
+  const collectorName = isCollection ? document.getElementById('collectorNameInput').value.trim() : '';
   if(dispatchCart.length === 0) return;
   const date = todayStr();
   const noteId = uid();
@@ -2111,18 +2179,25 @@ function submitDispatch(requireDriverSig){
     noteItems.push({ stockItemId: item.id, type: item.type, qty: item.qty, ref: item.ref });
   });
 
+  // On a collection note the single captured signature IS the receipt
+  // signature, so it goes into the site fields (leaving driver fields
+  // empty) — that makes isNoteComplete() true right away and the note
+  // lands under "Delivered" instead of waiting on a driver handover
+  // that never happens.
   const note = {
     id: noteId,
     number: 'DN-' + String(nextNo).padStart(4,'0'),
     date,
     customer: cust,
     items: noteItems,
-    driverSignature: driverSignature || null,
-    driverSignedDate: driverSignature ? date : null,
+    isCollection,
+    driverSignature: isCollection ? null : (capturedSignature || null),
+    driverSignedDate: (!isCollection && capturedSignature) ? date : null,
     driverName,
     vehicleReg,
-    siteSignature: null,
-    siteSignedDate: null
+    siteSignature: isCollection ? (capturedSignature || null) : null,
+    siteSignedDate: (isCollection && capturedSignature) ? date : null,
+    siteSignedBy: isCollection ? collectorName : ''
   };
   nextNo += 1;
   state.notes.push(note);
@@ -2151,14 +2226,20 @@ function viewNote(noteId){
   // into the signature caption instead), which is exactly the bug
   // being fixed: info entered/edited AFTER the initial save (via
   // openSigningDetails) wasn't reliably visible up top anymore.
-  const driverRow = (note.driverName || note.vehicleReg || note.driverSignedDate)
-    ? `<div class="docket-driver-row"><span>Driver: ${escHtml(note.driverName || '')}</span><span>${escHtml(note.driverSignedDate || '')}</span><span>${escHtml(note.vehicleReg || '')}</span></div>`
-    : '';
+  // Collection notes have no driver/vehicle, so this row instead
+  // records who collected and when — same three-column layout.
+  const driverRow = note.isCollection
+    ? ((note.siteSignedBy || note.siteSignedDate)
+      ? `<div class="docket-driver-row"><span>Collected by: ${escHtml(note.siteSignedBy || '')}</span><span>${escHtml(note.siteSignedDate || '')}</span><span>Collection</span></div>`
+      : `<div class="docket-driver-row"><span>Collection</span><span></span><span></span></div>`)
+    : ((note.driverName || note.vehicleReg || note.driverSignedDate)
+      ? `<div class="docket-driver-row"><span>Driver: ${escHtml(note.driverName || '')}</span><span>${escHtml(note.driverSignedDate || '')}</span><span>${escHtml(note.vehicleReg || '')}</span></div>`
+      : '');
   const driverBlock = note.driverSignature
     ? `<div class="docket-sig"><img src="${note.driverSignature}" alt="Driver signature"><div class="sig-label">Dispatched &amp; signed by driver</div></div>`
     : (note.signature ? `<div class="docket-sig"><img src="${note.signature}" alt="Signature"><div class="sig-label">Received &amp; signed by ${escHtml(note.customer)}${note.date ? ' — ' + escHtml(note.date) : ''}</div></div>` : '');
   const siteBlock = note.siteSignature
-    ? `<div class="docket-sig"><img src="${note.siteSignature}" alt="Site signature"><div class="sig-label">Received &amp; signed by ${escHtml(note.siteSignedBy || note.customer)}${note.siteSignedDate ? ' — ' + escHtml(note.siteSignedDate) : ''}</div></div>`
+    ? `<div class="docket-sig"><img src="${note.siteSignature}" alt="Site signature"><div class="sig-label">${note.isCollection ? 'Collected &amp; signed by' : 'Received &amp; signed by'} ${escHtml(note.siteSignedBy || note.customer)}${note.siteSignedDate ? ' — ' + escHtml(note.siteSignedDate) : ''}</div></div>`
     : '';
 
   const editableItems = !complete || rootOverride;
@@ -2245,7 +2326,7 @@ function viewNote(noteId){
         <button type="button" class="btn btn-sm" onclick="addAdhocItemToNote('${note.id}')">Add ad-hoc item</button>
       </div>
 
-      ${!note.driverSignature ? `
+      ${(!note.isCollection && !note.driverSignature) ? `
       <div class="field" style="margin-top:14px;">
         <label>Driver name</label>
         <input type="text" id="pendingDriverName" list="driverList" placeholder="e.g. Thabo M." style="width:100%;" value="${escHtml(note.driverName || '')}">
@@ -2263,17 +2344,17 @@ function viewNote(noteId){
         </div>
         <div id="pendingDriverErr" style="color:var(--rust);font-size:12px;margin-top:8px;display:none;">Driver signature required</div>
         <button type="button" class="btn btn-primary btn-sm" style="margin-top:8px;" onclick="confirmDriverSignaturePending('${note.id}')">Save driver signature</button>
-      </div>` : `
+      </div>` : (note.isCollection ? '' : `
       <div class="field" style="margin-top:14px;">
         <label class="sig-hint">Driver signature — saved${note.driverSignedDate ? ' ' + note.driverSignedDate : ''}${note.driverName ? ' · ' + note.driverName : ''}${note.vehicleReg ? ' · ' + note.vehicleReg : ''}</label>
-      </div>`}
+      </div>`)}
 
       <div class="field" style="margin-top:14px;">
-        <label>Site signature</label>
-        <input type="text" id="siteSignerName" placeholder="Name of person signing" style="width:100%;margin-bottom:8px;" value="${escHtml(note.siteSignedBy || '')}">
+        <label>${note.isCollection ? 'Collection signature' : 'Site signature'}</label>
+        <input type="text" id="siteSignerName" placeholder="${note.isCollection ? 'Name of person collecting' : 'Name of person signing'}" style="width:100%;margin-bottom:8px;" value="${escHtml(note.siteSignedBy || '')}">
         <div class="sigwrap"><canvas id="siteSigCanvas"></canvas></div>
         <div class="sig-actions">
-          <span class="sig-hint">${rootOverride ? 'Redrawing this replaces the site signature on the locked note' : 'Site contact signs to confirm receipt — locks this note'}</span>
+          <span class="sig-hint">${rootOverride ? 'Redrawing this replaces the signature on the locked note' : (note.isCollection ? 'Client signs to confirm they collected these items — locks this note' : 'Site contact signs to confirm receipt — locks this note')}</span>
           <button type="button" class="btn btn-sm" onclick="clearSignature('siteSigCanvas')">Clear</button>
         </div>
       </div>
@@ -2614,7 +2695,8 @@ function viewAllNotes(){
   const delivered = state.notes.filter(n => isNoteComplete(n));
 
   const noteStatusHint = (n) => {
-    if(isNoteComplete(n)) return '';
+    if(isNoteComplete(n)) return n.isCollection ? ' &middot; collected' : '';
+    if(n.isCollection) return ' &middot; collection — not yet signed';
     if(n.driverSignature) return ' &middot; awaiting site signature';
     return ' &middot; not yet signed';
   };
