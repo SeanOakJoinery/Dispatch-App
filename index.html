@@ -17,6 +17,33 @@ batched up later. Also update the relevant reference section below
 ========================================================================
 CHANGELOG (most recent first — add a new dated entry after every change)
 ========================================================================
+- 2026-09-11 (later #2): Restructured the board workflow, per user
+  request. Three changes, all interlocking:
+    1. NEW "READY TO DISPATCH" COLUMN (status 'ready', + readyDate on
+       items) sits between Finished and Dispatched, so inspected stock
+       has somewhere to wait before it's put on a note. Finished cards
+       now show "Mark ready" (markReady(), mirrors markVinaged()
+       exactly including partial-quantity split/merge) instead of
+       "Add to delivery note"; that button moved to Ready cards. The
+       cart panel + ad-hoc add form moved from the Dispatched column
+       into Ready to Dispatch, and the "Add from Finished stock"
+       dropdown inside an existing note now reads from 'ready' (and
+       is relabelled to match). combineDuplicates() now also folds
+       'ready' duplicates; removeItem()'s "damaged or written-off"
+       wording now covers 'ready' as well as 'vinaged'. Board CSS
+       grid went 3 -> 4 columns (2-up at <=1200px, 1-up at <=900px).
+    2. ITEMS NOW LEAVE THE DISPATCHED COLUMN WHEN THE DRIVER SIGNS,
+       not when the note is fully complete — user's wording: "keep
+       dispatched to show the items out for dispatch only when the
+       driver signs then it shifts to waiting for signature". The
+       archivedHint under that column was reworded to match.
+    3. DELIVERY NOTES LIST IS NOW TWO COLLAPSIBLE <details> GROUPS —
+       "Waiting for signature" (anything !isNoteComplete) and
+       "Delivered" (isNoteComplete) — per "i want as dropdown lists so
+       that it doesn't take too much space". Both start collapsed.
+       Cards inside the waiting group distinguish the two sub-states
+       in their subtitle: "awaiting site signature" if the driver has
+       signed, "not yet signed" if neither has.
 - 2026-09-11 (later): Fixed the delivery note header to always show
   driver info, per user clarification of the driver-roster request
   above ("i want it so even after i saved it and then put the driver
@@ -646,8 +673,17 @@ GOOGLE DRIVE (PDF archiving only — NOT board data sync)
 
 CORE DATA MODEL (persisted as one JSON blob under storage key "board")
 - state.items[]: { id, type, qty, ref, status: 'unvinaged'|'vinaged'|
-  'dispatched', addedDate, vinagedDate, dispatchedDate, noteId }.
-  Statuses map to board columns: Unfinished / Finished / Dispatched.
+  'ready'|'dispatched', addedDate, vinagedDate, readyDate,
+  dispatchedDate, noteId }. Statuses map to board columns: Unfinished /
+  Finished / Ready to Dispatch / Dispatched. 'ready' added 2026-09-11 —
+  Finished items are inspected, then moved to Ready to Dispatch
+  (markReady(), mirrors markVinaged()'s partial-quantity support), and
+  ONLY from Ready to Dispatch can they be added to a delivery note
+  (addToDispatchCart/the "Add from Ready to Dispatch stock" dropdown in
+  an existing note) — Finished itself no longer feeds a note directly.
+  Items leave the Dispatched column once the DRIVER signs (not once
+  fully complete) — see viewAllNotes' Waiting for signature/Delivered
+  split below for where they go from there.
 - state.notes[]: { id, number ('DN-0001'...), date, customer,
   items: [{stockItemId, type, qty, ref}], driverSignature (dataURL|
   null), driverSignedDate, driverName, vehicleReg, siteSignature
@@ -891,7 +927,8 @@ WHEN THE USER UPLOADS THIS FILE AGAIN
   select:focus,input:focus{outline:none;border-color:var(--amber);}
   input[type=number]{min-width:70px;}
 
-  .board{display:grid;grid-template-columns:1fr 1fr 1fr;gap:18px;align-items:start;}
+  .board{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:16px;align-items:start;}
+  @media(max-width:1200px){.board{grid-template-columns:1fr 1fr;}}
   @media(max-width:900px){.board{grid-template-columns:1fr;}}
   @media(max-width:640px){
     body{padding:18px 14px 60px;padding-bottom:calc(60px + env(safe-area-inset-bottom));}
@@ -1102,9 +1139,8 @@ WHEN THE USER UPLOADS THIS FILE AGAIN
     </div>
     <div class="col-body" id="col-vinaged"></div>
   </div>
-  <div class="col dispatched">
-    <div class="col-head"><h2>Dispatched</h2><span class="count" id="cnt-dispatched">0</span></div>
-    <div id="archivedHint" style="font-size:11.5px;color:var(--muted);margin:-4px 0 8px;display:none;"></div>
+  <div class="col ready">
+    <div class="col-head"><h2>Ready to Dispatch</h2><span class="count" id="cnt-ready">0</span></div>
     <div id="cartPanel"></div>
     <div class="col-add" id="addbarDis">
       <input type="text" id="typeCustomInputDis" list="itemTypesList" placeholder="Item description">
@@ -1113,6 +1149,11 @@ WHEN THE USER UPLOADS THIS FILE AGAIN
       <input type="text" id="refInputDis" value="NH Hotel">
       <button class="btn btn-primary" id="addBtnDis">+ Add item to delivery note</button>
     </div>
+    <div class="col-body" id="col-ready"></div>
+  </div>
+  <div class="col dispatched">
+    <div class="col-head"><h2>Dispatched</h2><span class="count" id="cnt-dispatched">0</span></div>
+    <div id="archivedHint" style="font-size:11.5px;color:var(--muted);margin:-4px 0 8px;display:none;"></div>
     <div class="col-body" id="col-dispatched"></div>
   </div>
 </div>
@@ -1508,14 +1549,22 @@ function specHtml(type){
 }
 
 function render(){
-  const cols = {unvinaged:[], vinaged:[], dispatched:[]};
+  const cols = {unvinaged:[], vinaged:[], ready:[], dispatched:[]};
   let archivedCount = 0;
   state.items.forEach(it => {
     if(it.status === 'dispatched'){
       const note = state.notes.find(n => n.id === it.noteId);
-      if(note && isNoteComplete(note)){
+      // CHANGED 2026-09-11 per user request: items now leave the
+      // Dispatched column as soon as the DRIVER signs (out for
+      // delivery -> handed over), not only once fully complete —
+      // previously this only hid items once isNoteComplete() (site
+      // signature too) was true. The note itself (with its remaining
+      // items) then shows under "Waiting for signature" in the
+      // Delivery Notes list (viewAllNotes) until the site/client also
+      // signs, at which point it moves to "Delivered" there.
+      if(note && note.driverSignature){
         archivedCount++;
-        return; // fully signed off — hidden from the board, still viewable via "Delivery notes"
+        return; // driver has signed — out of the active board, still viewable via "Delivery notes"
       }
     }
     cols[it.status].push(it);
@@ -1523,13 +1572,14 @@ function render(){
 
   document.getElementById('cnt-unvinaged').textContent = cols.unvinaged.length;
   document.getElementById('cnt-vinaged').textContent = cols.vinaged.length;
+  document.getElementById('cnt-ready').textContent = cols.ready.length;
   document.getElementById('cnt-dispatched').textContent = cols.dispatched.length;
   document.getElementById('notesCount').textContent = state.notes.length;
 
   const hintEl = document.getElementById('archivedHint');
   if(hintEl){
     if(archivedCount > 0){
-      hintEl.textContent = `${archivedCount} completed deliver${archivedCount === 1 ? 'y' : 'ies'} — signed off and hidden here, view under "Delivery notes"`;
+      hintEl.textContent = `${archivedCount} item${archivedCount === 1 ? '' : 's'} handed to the driver — view under "Delivery notes"`;
       hintEl.style.display = 'block';
     } else {
       hintEl.style.display = 'none';
@@ -1538,6 +1588,7 @@ function render(){
 
   renderCol('unvinaged', cols.unvinaged);
   renderCol('vinaged', cols.vinaged);
+  renderCol('ready', cols.ready);
   renderCol('dispatched', cols.dispatched);
   renderCartPanel();
 }
@@ -1577,6 +1628,14 @@ function cardHtml(it, status){
     actions = can('moveItems') ? `<button class="btn btn-green btn-sm" onclick="markVinaged('${it.id}')">Mark finished</button>` : '';
   } else if(status === 'vinaged'){
     dates += `<span>Finished ${it.vinagedDate}</span>`;
+    // Per user request: Finished items now move to a "Ready to
+    // Dispatch" holding stage after inspection, rather than straight
+    // into a delivery note — markReady() mirrors markVinaged()'s
+    // partial-quantity support. Adding to an actual delivery note
+    // happens one stage later, from 'ready' status (see below).
+    actions = can('moveItems') ? `<button class="btn btn-green btn-sm" onclick="markReady('${it.id}')">Mark ready</button>` : '';
+  } else if(status === 'ready'){
+    dates += `<span>Finished ${it.vinagedDate}</span><span>Ready ${it.readyDate}</span>`;
     const inCart = dispatchCart.some(c => c.stockItemId === it.id);
     if(!can('moveItems')){
       actions = '';
@@ -1586,7 +1645,7 @@ function cardHtml(it, status){
         : `<button class="btn btn-primary btn-sm" onclick="addToDispatchCart('${it.id}')">Add to delivery note</button>`;
     }
   } else {
-    dates += `<span>Finished ${it.vinagedDate}</span><span>Dispatched ${it.dispatchedDate}</span>`;
+    dates += `<span>Finished ${it.vinagedDate}</span><span>Ready ${it.readyDate}</span><span>Dispatched ${it.dispatchedDate}</span>`;
     const note = state.notes.find(n => n.id === it.noteId);
     const complete = note ? isNoteComplete(note) : true;
     actions = can('manageNotes')
@@ -1595,7 +1654,7 @@ function cardHtml(it, status){
         : `<button class="btn btn-primary btn-sm" onclick="viewNote('${it.noteId}')">Complete signature</button>`)
       : '';
   }
-  const canRemoveHere = can('removeItems') && (status==='unvinaged' || (status==='vinaged' && !dispatchCart.some(c => c.stockItemId === it.id)));
+  const canRemoveHere = can('removeItems') && (status==='unvinaged' || status==='vinaged' || (status==='ready' && !dispatchCart.some(c => c.stockItemId === it.id)));
   return `<div class="card">
     <div class="card-top">
       <div>
@@ -1620,7 +1679,7 @@ function findMergeTarget(status, type, ref){
 function combineDuplicates(){
   if(!can('exportData')) return;
   let mergedCount = 0;
-  ['unvinaged', 'vinaged'].forEach(status => {
+  ['unvinaged', 'vinaged', 'ready'].forEach(status => {
     const groups = {};
     state.items.filter(it => it.status === status).forEach(it => {
       const key = it.type + '|' + (it.ref || '');
@@ -1663,6 +1722,7 @@ document.getElementById('addBtn').addEventListener('click', () => {
       addedDate: todayStr(),
       vinagedDate: null,
       dispatchedDate: null,
+      readyDate: null,
       noteId: null
     });
   }
@@ -1715,6 +1775,7 @@ document.getElementById('addBtnFin').addEventListener('click', () => {
       addedDate: today,
       vinagedDate: today,
       dispatchedDate: null,
+      readyDate: null,
       noteId: null
     });
   }
@@ -1802,6 +1863,52 @@ function markVinaged(id){
         addedDate: it.addedDate,
         vinagedDate: todayStr(),
         dispatchedDate: null,
+        readyDate: null,
+        noteId: null
+      });
+    }
+  }
+  save(); render();
+}
+
+// Mirrors markVinaged() exactly, one stage later — moves Finished
+// stock into "Ready to Dispatch" after inspection, per user request.
+// Same partial-quantity support: if only some of a Finished card's
+// quantity has actually been inspected/is ready, split off just that
+// amount rather than forcing the whole card to move at once.
+function markReady(id){
+  if(!can('moveItems')) return;
+  const it = state.items.find(x => x.id === id);
+  if(!it) return;
+
+  let moveQty = it.qty;
+  if(it.qty > 1){
+    const input = prompt(`How many "${it.type}"${it.ref ? ' (' + it.ref + ')' : ''} are ready to dispatch? (${it.qty} finished)`, String(it.qty));
+    if(input === null) return;
+    const n = parseInt(input);
+    if(!n || n <= 0){
+      alert('Enter a quantity greater than 0.');
+      return;
+    }
+    moveQty = Math.min(n, it.qty);
+  }
+
+  if(moveQty >= it.qty){
+    it.status = 'ready';
+    it.readyDate = todayStr();
+  } else {
+    it.qty -= moveQty;
+    const existing = findMergeTarget('ready', it.type, it.ref);
+    if(existing){
+      existing.qty += moveQty;
+    } else {
+      state.items.push({
+        id: uid(), type: it.type, qty: moveQty, ref: it.ref,
+        status: 'ready',
+        addedDate: it.addedDate,
+        vinagedDate: it.vinagedDate,
+        readyDate: todayStr(),
+        dispatchedDate: null,
         noteId: null
       });
     }
@@ -1814,7 +1921,7 @@ function removeItem(id){
   const it = state.items.find(x => x.id === id);
   if(!it) return;
   const label = `${it.type}${it.ref ? ' (' + it.ref + ')' : ''}`;
-  const isFinished = it.status === 'vinaged';
+  const isFinished = it.status === 'vinaged' || it.status === 'ready';
   const promptMsg = it.qty > 1
     ? `How many "${label}" do you want to remove? (${it.qty} in stock)${isFinished ? ' — use for damaged or written-off items' : ''}`
     : `Remove "${label}"?${isFinished ? ' Use for damaged or written-off items.' : ''}`;
@@ -1989,12 +2096,13 @@ function submitDispatch(requireDriverSig){
       item.dispatchedDate = date;
       item.noteId = noteId;
     } else {
-      consumeFromStatus('vinaged', c.type, c.qty);
+      consumeFromStatus('ready', c.type, c.qty);
       item = {
         id: uid(), type: c.type, qty: c.qty, ref: c.ref,
         status: 'dispatched',
         addedDate: date,
         vinagedDate: date,
+        readyDate: date,
         dispatchedDate: date,
         noteId: noteId
       };
@@ -2044,7 +2152,7 @@ function viewNote(noteId){
   // being fixed: info entered/edited AFTER the initial save (via
   // openSigningDetails) wasn't reliably visible up top anymore.
   const driverRow = (note.driverName || note.vehicleReg || note.driverSignedDate)
-    ? `<div class="docket-driver-row"><span>${escHtml(note.driverName || '')}</span><span>${escHtml(note.driverSignedDate || '')}</span><span>${escHtml(note.vehicleReg || '')}</span></div>`
+    ? `<div class="docket-driver-row"><span>Driver: ${escHtml(note.driverName || '')}</span><span>${escHtml(note.driverSignedDate || '')}</span><span>${escHtml(note.vehicleReg || '')}</span></div>`
     : '';
   const driverBlock = note.driverSignature
     ? `<div class="docket-sig"><img src="${note.driverSignature}" alt="Driver signature"><div class="sig-label">Dispatched &amp; signed by driver</div></div>`
@@ -2083,7 +2191,7 @@ function viewNote(noteId){
           </div>
           <div class="docket-date">${note.date}</div>
         </div>
-        <div class="docket-row"><span>To</span><span>${escHtml(note.customer)}</span></div>
+        <div class="docket-row"><span>To:</span><span>${escHtml(note.customer)}</span></div>
         ${driverRow}
         <div class="docket-items">
           ${itemsHeader}
@@ -2110,7 +2218,7 @@ function viewNote(noteId){
     return;
   }
 
-  const finishedOptions = state.items.filter(it => it.status === 'vinaged').map(it =>
+  const readyOptions = state.items.filter(it => it.status === 'ready').map(it =>
     `<option value="${it.id}">${escHtml(it.type)}${it.ref ? ' — ' + escHtml(it.ref) : ''} (x${it.qty})</option>`
   ).join('');
 
@@ -2119,10 +2227,10 @@ function viewNote(noteId){
       ${docketHtml}
 
       <div class="add-item-row">
-        <label class="sig-hint" style="margin-bottom:2px;">Add from Finished stock</label>
+        <label class="sig-hint" style="margin-bottom:2px;">Add from Ready to Dispatch stock</label>
         <select id="addFromFinished">
           <option value="">— choose an item —</option>
-          ${finishedOptions}
+          ${readyOptions}
         </select>
         <button type="button" class="btn btn-sm" onclick="addFinishedItemToNote('${note.id}')">Add selected item</button>
       </div>
@@ -2495,14 +2603,39 @@ function viewAllNotes(){
     layer.innerHTML = `<div class="modal-bg" id="allBg"><div class="modal"><h3>Delivery notes</h3><div class="hint">None created yet</div><div class="modal-actions"><button class="btn" onclick="closeModal()">Close</button></div></div></div>`;
     return;
   }
+  // Restructured into collapsible <details> groups per user request
+  // ("i want as dropdown lists so that it doesnt take too much space")
+  // — Waiting for signature covers everything not fully signed off yet
+  // (whether the driver has signed and it's awaiting the site/client
+  // signature, or it hasn't been signed at all), Delivered is anything
+  // isNoteComplete(). Both start collapsed to actually save space; tap
+  // either heading to expand it.
+  const waiting = state.notes.filter(n => !isNoteComplete(n));
+  const delivered = state.notes.filter(n => isNoteComplete(n));
+
+  const noteStatusHint = (n) => {
+    if(isNoteComplete(n)) return '';
+    if(n.driverSignature) return ' &middot; awaiting site signature';
+    return ' &middot; not yet signed';
+  };
+  const noteCardHtml = (n) => `<div class="card" style="cursor:pointer;" onclick="viewNote('${n.id}')">
+    <div class="card-top"><div class="card-type" style="font-size:15px;">${n.number}</div><span class="card-qty">${n.date}</span></div>
+    <div class="card-ref">${n.customer}${noteStatusHint(n)}</div>
+  </div>`;
+
+  const groupHtml = (title, list) => `<details style="margin-bottom:10px;">
+    <summary style="cursor:pointer;font-weight:600;padding:6px 0;color:var(--ink);">${title} (${list.length})</summary>
+    <div style="display:flex;flex-direction:column;gap:8px;margin-top:8px;">
+      ${list.length > 0 ? list.slice().reverse().map(noteCardHtml).join('') : '<div class="hint" style="margin:0;">None</div>'}
+    </div>
+  </details>`;
+
   layer.innerHTML = `<div class="modal-bg" id="allBg"><div class="modal" style="max-width:460px;">
     <h3>Delivery notes</h3>
-    <div class="hint">${state.notes.length} created</div>
-    <div style="display:flex;flex-direction:column;gap:8px;max-height:340px;overflow:auto;">
-      ${state.notes.slice().reverse().map(n => `<div class="card" style="cursor:pointer;" onclick="viewNote('${n.id}')">
-        <div class="card-top"><div class="card-type" style="font-size:15px;">${n.number}</div><span class="card-qty">${n.date}</span></div>
-        <div class="card-ref">${n.customer}${isNoteComplete(n) ? '' : ' &middot; awaiting site signature'}</div>
-      </div>`).join('')}
+    <div class="hint">${state.notes.length} total</div>
+    <div style="max-height:420px;overflow:auto;">
+      ${groupHtml('Waiting for signature', waiting)}
+      ${groupHtml('Delivered', delivered)}
     </div>
     <div class="modal-actions"><button class="btn" onclick="closeModal()">Close</button></div>
   </div></div>`;
