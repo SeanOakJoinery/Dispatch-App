@@ -17,6 +17,36 @@ batched up later. Also update the relevant reference section below
 ========================================================================
 CHANGELOG (most recent first — add a new dated entry after every change)
 ========================================================================
+- 2026-09-11 (later #4): PER-APP ACCESS CONTROL, per user request ("add
+  a section where i can chose witch user can use witch app and there
+  name only shows on that app and main root can acses all apps and add
+  secondery root can only acses what main root chose").
+  users[] is shared between this app and the Stock List app (same
+  Firebase 'dispatchBoard' node), so accounts can now be scoped per app.
+    - NEW FIELDS: u.apps = {dispatch, stock} and u.isMainRoot (bool, set
+      on the very first account createRootAccount() makes).
+    - HELPERS (block is IDENTICAL in both apps except the APP_ID line —
+      keep them in sync): APP_ID / APP_LABELS / defaultApps() /
+      getMainRoot() / isMainRoot() / currentUserIsMainRoot() /
+      userHasApp().
+    - LOGIN SCREEN now lists only users with access to THIS app, so a
+      stock-only account simply doesn't appear on the dispatch login
+      (and vice versa). If nobody has access it shows a "No access"
+      card rather than an empty picker.
+    - MANAGE USERS gained an "App access" checkbox pair. Main root is
+      the ONLY account that can change it (checkboxes are disabled for
+      everyone else, AND saveUserForm ignores the DOM for non-main-root
+      and carries existing values through — so a secondary root can't
+      widen its own or anyone's reach by fiddling with the form). The
+      user list now shows each account's apps as a tag.
+    - MAIN ROOT IS PROTECTED: can't be deleted, can't be demoted from
+      root, can't be edited by a secondary root, and always keeps every
+      app regardless of checkbox state.
+    - MIGRATION: accounts predating this have no apps{} at all, which
+      userHasApp() treats as full access — nobody gets locked out by
+      the upgrade. getMainRoot() likewise falls back to the first root
+      account when no isMainRoot flag exists yet, which is always the
+      one createRootAccount() originally made.
 - 2026-09-11 (later #3): Added a COLLECTION toggle to the delivery-note
   modal, per user request ("add a collection toggle that then makes it
   that i only need 1 signature"). When the client collects the goods
@@ -1309,6 +1339,49 @@ function can(key){
 function currentUserIsRoot(){
   const u = getCurrentUser();
   return !!(u && u.isRoot);
+}
+
+// --- PER-APP ACCESS (added 2026-09-11) ---------------------------------
+// users[] is shared between this app and the Stock List app (same
+// Firebase 'dispatchBoard' node), so a single account can now be scoped
+// to one app or both. u.apps = { dispatch: bool, stock: bool }.
+// APP_ID is the ONLY line that differs between the two apps' copies of
+// this block — keep them otherwise identical.
+const APP_ID = 'dispatch';
+const APP_LABELS = { dispatch: 'Dispatch app', stock: 'Stock List app' };
+
+function defaultApps(){
+  return { dispatch: true, stock: true };
+}
+
+// The main root is the board's original owner: the only account that can
+// reach every app regardless of its apps{} flags, and the only one that
+// can change anyone's app access (including other roots'). Identified by
+// isMainRoot; for boards created before this existed, falls back to the
+// first root account, which is always the one createRootAccount() made.
+function getMainRoot(){
+  return users.find(u => u.isMainRoot) || users.find(u => u.isRoot) || null;
+}
+
+function isMainRoot(u){
+  const mr = getMainRoot();
+  return !!(u && mr && u.id === mr.id);
+}
+
+function currentUserIsMainRoot(){
+  return isMainRoot(getCurrentUser());
+}
+
+// Whether a given user may use the app this file is. Main root always
+// can. Everyone else needs the flag; accounts predating this feature
+// have no apps{} at all, so they default to full access rather than
+// being locked out by an upgrade.
+function userHasApp(u, appId){
+  appId = appId || APP_ID;
+  if(!u) return false;
+  if(isMainRoot(u)) return true;
+  if(!u.apps) return true; // legacy account — not yet scoped
+  return !!u.apps[appId];
 }
 
 function todayStr(){
@@ -3113,10 +3186,21 @@ function showLoginScreen(){
     return;
   }
 
+  // Only show accounts allowed to use THIS app (see userHasApp) — a
+  // user scoped to the Stock List app simply doesn't appear here.
+  const appUsers = users.filter(u => userHasApp(u));
+  if(appUsers.length === 0){
+    layer.innerHTML = `<div class="login-card">
+      <h3>No access</h3>
+      <div class="hint">No account on this board has been given access to the ${APP_LABELS[APP_ID]}. Ask the main root account to grant access under Manage users.</div>
+    </div>`;
+    return;
+  }
+
   layer.innerHTML = `<div class="login-card">
     <h3>Who's this?</h3>
     <div class="hint">Pick your name to continue.</div>
-    ${users.map(u => `<button class="user-pick-btn" onclick="promptPin('${u.id}')">${escHtml(u.username)}${u.isRoot ? ' (root)' : ''}</button>`).join('')}
+    ${appUsers.map(u => `<button class="user-pick-btn" onclick="promptPin('${u.id}')">${escHtml(u.username)}${u.isRoot ? ' (root)' : ''}</button>`).join('')}
   </div>`;
 }
 
@@ -3207,7 +3291,9 @@ async function createRootAccount(){
     return;
   }
   const pinHash = await hashPin(pin);
-  const rootUser = { id: uid(), username, pin: pinHash, isRoot: true, permissions: defaultPermissions() };
+  // First account ever created on this board is the MAIN root: the
+  // only one that can reach every app and grant app access to others.
+  const rootUser = { id: uid(), username, pin: pinHash, isRoot: true, isMainRoot: true, permissions: defaultPermissions(), apps: defaultApps() };
   users.push(rootUser);
   currentUserId = rootUser.id;
   try{ await storage.set('currentUserId', rootUser.id, false); }catch(e){}
@@ -3315,6 +3401,16 @@ function openManageUsers(editId){
   const layer = document.getElementById('modalLayer');
   const editing = editId ? users.find(u => u.id === editId) : null;
   const perms = editing ? editing.permissions : defaultPermissions();
+  const apps = editing ? (editing.apps || defaultApps()) : defaultApps();
+  // Only the main root may change app access, or touch the main root
+  // account at all — a secondary root can manage ordinary users but
+  // can't widen its own reach or anyone else's beyond what it was given.
+  const iAmMainRoot = currentUserIsMainRoot();
+  const editingMainRoot = editing ? isMainRoot(editing) : false;
+  if(editingMainRoot && !iAmMainRoot){
+    alert('Only the main root account can edit itself.');
+    return;
+  }
 
   layer.innerHTML = `<div class="modal-bg" id="usersBg">
     <div class="modal" style="max-width:520px;">
@@ -3322,10 +3418,10 @@ function openManageUsers(editId){
       ${editing ? '' : `<div class="hint">Add people who use this board and choose exactly what each one can do.</div>
       <div id="userList">
         ${users.map(u => `<div class="user-row">
-          <span class="who">${escHtml(u.username)}${u.isRoot ? '<span class="tag">Root — full access</span>' : ''}</span>
+          <span class="who">${escHtml(u.username)}${isMainRoot(u) ? '<span class="tag">Main root — all apps</span>' : (u.isRoot ? '<span class="tag">Root</span>' : '')}<span class="tag" style="opacity:.75;">${Object.keys(APP_LABELS).filter(a => userHasApp(u, a)).map(a => APP_LABELS[a]).join(', ') || 'No apps'}</span></span>
           <span class="acts">
-            <button onclick="openManageUsers('${u.id}')">Edit</button>
-            ${users.length > 1 ? `<button onclick="deleteUser('${u.id}')">Delete</button>` : ''}
+            ${(isMainRoot(u) && !iAmMainRoot) ? '' : `<button onclick="openManageUsers('${u.id}')">Edit</button>`}
+            ${(users.length > 1 && !isMainRoot(u)) ? `<button onclick="deleteUser('${u.id}')">Delete</button>` : ''}
           </span>
         </div>`).join('')}
       </div>
@@ -3338,8 +3434,12 @@ function openManageUsers(editId){
         <label>PIN</label>
         <input type="text" id="userFormPin" value="" placeholder="${editing ? 'Leave blank to keep current PIN' : 'At least 4 characters'}">
       </div>
-      <label style="display:flex;align-items:center;gap:7px;font-size:13px;font-weight:400;margin-bottom:6px;">
-        <input type="checkbox" id="userFormRoot" ${editing && editing.isRoot ? 'checked' : ''}> Full access (root — can do everything)
+      <div style="font-size:12px;font-weight:600;margin-bottom:6px;">App access${iAmMainRoot ? '' : ' (main root only)'}</div>
+      <div class="perm-grid" style="${iAmMainRoot ? '' : 'opacity:.5;'}">
+        ${Object.keys(APP_LABELS).map(a => `<label><input type="checkbox" class="appCheck" data-app="${a}" ${apps[a] ? 'checked' : ''} ${iAmMainRoot ? '' : 'disabled'}> ${APP_LABELS[a]}</label>`).join('')}
+      </div>
+      <label style="display:flex;align-items:center;gap:7px;font-size:13px;font-weight:400;margin:10px 0 6px;">
+        <input type="checkbox" id="userFormRoot" ${editing && editing.isRoot ? 'checked' : ''}${editingMainRoot ? ' disabled' : ''}> Full access (root — can do everything in their apps)
       </label>
       <div class="perm-grid" id="permGrid">
         ${PERMISSION_LABELS.map(([key,label]) => `<label><input type="checkbox" class="permCheck" data-key="${key}" ${perms[key] ? 'checked' : ''}> ${label}</label>`).join('')}
@@ -3396,16 +3496,31 @@ async function saveUserForm(editId){
   const permissions = existingUser ? {...defaultPermissions(), ...existingUser.permissions} : defaultPermissions();
   document.querySelectorAll('.permCheck').forEach(cb => { permissions[cb.dataset.key] = cb.checked; });
 
+  // App access is main-root-only. For anyone else the checkboxes are
+  // disabled, so we deliberately ignore the DOM and carry the existing
+  // values through — a secondary root editing a user must not be able
+  // to widen (or narrow) which apps that user can reach.
+  let apps;
+  if(currentUserIsMainRoot()){
+    apps = {};
+    document.querySelectorAll('.appCheck').forEach(cb => { apps[cb.dataset.app] = cb.checked; });
+  } else {
+    apps = existingUser ? (existingUser.apps || defaultApps()) : defaultApps();
+  }
+
   if(editId){
     const u = users.find(x => x.id === editId);
     if(u){
+      if(isMainRoot(u) && !currentUserIsMainRoot()) return; // belt and braces
       u.username = username;
       if(pin) u.pin = await hashPin(pin);
-      u.isRoot = isRoot;
+      // The main root always stays root and always keeps every app.
+      u.isRoot = isMainRoot(u) ? true : isRoot;
       u.permissions = permissions;
+      u.apps = isMainRoot(u) ? defaultApps() : apps;
     }
   } else {
-    users.push({ id: uid(), username, pin: await hashPin(pin), isRoot, permissions });
+    users.push({ id: uid(), username, pin: await hashPin(pin), isRoot, permissions, apps });
   }
   save();
   renderUserBadge();
@@ -3416,6 +3531,10 @@ async function saveUserForm(editId){
 function deleteUser(userId){
   const target = users.find(u => u.id === userId);
   if(!target) return;
+  if(isMainRoot(target)){
+    alert("You can't delete the main root account.");
+    return;
+  }
   if(target.isRoot && users.filter(u => u.isRoot).length <= 1){
     alert("You can't delete the only root account — make another user root first.");
     return;
