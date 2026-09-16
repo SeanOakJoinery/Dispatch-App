@@ -17,6 +17,26 @@ batched up later. Also update the relevant reference section below
 ========================================================================
 CHANGELOG (most recent first — add a new dated entry after every change)
 ========================================================================
+- 2026-09-16 (later still #4): Removed the forced Google account
+  chooser (prompt: 'select_account') added earlier the same day — per
+  user follow-up that other staff also use this app but don't have
+  Sean's Google credentials, so showing them an account picker for an
+  account they can't sign into was pointless. connectDrive() and
+  tryAutoReconnectDrive() now pass hint: ALLOWED_DRIVE_EMAIL instead,
+  which goes straight through if that account is already signed into
+  the browser, or prompts to sign into specifically that account if
+  not — no picker either way. Enforcement is unchanged: onDriveSignedIn
+  still verifies the email server-side via userinfo regardless of how
+  sign-in was triggered.
+- 2026-09-16 (later still #3): Restricted Google Drive to ONE account,
+  sean@oakjoinery.co.za, per user request. onDriveSignedIn() now calls
+  Google's userinfo endpoint after every sign-in (covers both manual
+  Connect and silent auto-reconnect on load, since both use the same
+  callback) and disconnects immediately with an alert if the signed-in
+  email doesn't match. New ALLOWED_DRIVE_EMAIL constant controls this —
+  change that one line to allow a different/additional account later
+  (currently single-account only, not a list). Drive modal hint text
+  updated to mention the restriction up front.
 - 2026-09-16 (later still #2): Replaced the generic "N items handed to
   the driver — view under Delivery notes" line under the Dispatched
   column with one clickable line PER note still waiting on a site
@@ -779,6 +799,27 @@ GOOGLE DRIVE (PDF archiving only — NOT board data sync)
   first confirm the ID's leading number matches project number
   841117816256 before touching Console settings.
 - Scope requested: https://www.googleapis.com/auth/drive
+- RESTRICTED TO ONE ACCOUNT (2026-09-16): only sean@oakjoinery.co.za can
+  connect. Enforced in onDriveSignedIn() via a call to Google's
+  oauth2/v3/userinfo endpoint right after any sign-in (manual connect
+  AND silent auto-reconnect both funnel through this one callback) —
+  if the returned email doesn't match ALLOWED_DRIVE_EMAIL, the token is
+  discarded and drive.status is forced back to disconnected/error with
+  an alert. To change the allowed account later, edit the
+  ALLOWED_DRIVE_EMAIL constant just above onDriveSignedIn(). Same
+  "deterrent, not a real security boundary" caveat as the rest of this
+  app's client-side login system — someone with devtools access could
+  bypass it, this just stops it happening by accident via the normal UI.
+  UX (2026-09-16, later): connectDrive()/tryAutoReconnectDrive() pass
+  hint: ALLOWED_DRIVE_EMAIL to requestAccessToken() instead of forcing
+  Google's full account chooser (prompt: 'select_account') — per user
+  follow-up that other staff use this app too but don't have Sean's
+  Google credentials, so the chooser was pointless friction for
+  everyone but him. hint targets that account directly (signs straight
+  through if already logged into the browser, otherwise prompts to log
+  into THAT account specifically). This is UX only — the actual
+  enforcement is still the userinfo check above, which runs regardless
+  of how sign-in got triggered.
 - Google Drive is used for exactly ONE thing: when a delivery note is
   locked, "Save to Drive" (saveDispatchRecordToDrive/manualSaveRecord)
   renders the docket to a PDF (html2canvas + jsPDF) and uploads it into
@@ -2919,7 +2960,7 @@ function openDriveSettings(){
   layer.innerHTML = `<div class="modal-bg" id="driveBg">
     <div class="modal">
       <h3>Google Drive</h3>
-      <div class="hint">${connected ? 'Connected — signed delivery notes save a permanent PDF copy to your Drive when locked.' : 'Paste your Google OAuth Client ID to save a permanent PDF copy of each signed delivery note to your Drive.'}</div>
+      <div class="hint">${connected ? 'Connected — signed delivery notes save a permanent PDF copy to your Drive when locked.' : 'Paste your Google OAuth Client ID to save a permanent PDF copy of each signed delivery note to your Drive. Only sean@oakjoinery.co.za can connect.'}</div>
       ${!connected ? `
       <div class="field">
         <label>OAuth Client ID</label>
@@ -2987,18 +3028,26 @@ function connectDrive(){
     return;
   }
   setDriveStatus('syncing');
-  // 'select_account' forces Google's account chooser to show every time,
-  // instead of silently using whichever Google account happens to be
-  // signed into the browser — user hit this exact problem (2026-09-16):
-  // it grabbed a personal Gmail account instead of the intended one.
-  tc.requestAccessToken({ prompt: 'select_account consent' });
+  // CHANGED 2026-09-16: was 'select_account consent', which forced
+  // Google's full account chooser every time. Per user follow-up
+  // ("i dont want to see google choser... other users get the app and
+  // they dont have my sign in information") — since only Sean actually
+  // has credentials for the allowed account anyway, the chooser was
+  // pure friction, not a real choice for anyone else. `hint` (Google's
+  // login_hint) targets that account directly: if it's already signed
+  // into the browser, sign-in proceeds straight through with no
+  // chooser; if not, Google prompts to sign into THAT account
+  // specifically rather than offering a picker. onDriveSignedIn()'s
+  // email verification (see ALLOWED_DRIVE_EMAIL above) still runs
+  // regardless — hint is just a UX nicety, not the enforcement.
+  tc.requestAccessToken({ prompt: 'consent', hint: ALLOWED_DRIVE_EMAIL });
 }
 
 function tryAutoReconnectDrive(){
   setTimeout(() => {
     const tc = ensureTokenClient();
     if(!tc) return;
-    tc.requestAccessToken({ prompt: '' });
+    tc.requestAccessToken({ prompt: '', hint: ALLOWED_DRIVE_EMAIL });
   }, 400);
 }
 
@@ -3214,7 +3263,39 @@ async function manualSaveRecord(noteId){
   }
 }
 
+// Drive is restricted to one specific Google account, per user request
+// (2026-09-16: "change it that it usis only sean@oakjionery.co.za for
+// google drive"). The account picker (prompt: 'select_account consent'
+// in connectDrive) lets someone CHOOSE the wrong account, so this is
+// the actual enforcement: after any sign-in — manual connect OR silent
+// auto-reconnect on load, both funnel through this same callback —
+// verify the token's account via Google's userinfo endpoint and
+// disconnect immediately if it doesn't match. Client-side only, same
+// "deterrent not a real security boundary" caveat as the users[]
+// login system elsewhere in this file.
+const ALLOWED_DRIVE_EMAIL = 'sean@oakjoinery.co.za';
+
 async function onDriveSignedIn(){
+  try{
+    const res = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+      headers: { Authorization: 'Bearer ' + driveAccessToken }
+    });
+    const info = await res.json();
+    const email = (info.email || '').toLowerCase();
+    if(email !== ALLOWED_DRIVE_EMAIL.toLowerCase()){
+      driveAccessToken = null;
+      setDriveStatus('disconnected');
+      alert(`Google Drive here is restricted to ${ALLOWED_DRIVE_EMAIL}. You signed in as ${info.email || 'a different account'} — please reconnect using the correct account.`);
+      return;
+    }
+  }catch(e){
+    // Couldn't verify the account for some reason — fail safe rather
+    // than silently trusting an unverified sign-in.
+    driveAccessToken = null;
+    setDriveStatus('error');
+    alert("Couldn't verify the signed-in Google account — please try connecting again.");
+    return;
+  }
   // Drive is now only used for archiving PDFs of locked delivery notes —
   // board data (items/notes/itemTypes) syncs via jsonbin, not Drive.
   // Signing in just confirms we have a usable access token.
