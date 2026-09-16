@@ -17,6 +17,16 @@ batched up later. Also update the relevant reference section below
 ========================================================================
 CHANGELOG (most recent first — add a new dated entry after every change)
 ========================================================================
+- 2026-09-16 (later still #5): Fixed a bug in the account-restriction
+  check itself: DRIVE_SCOPE only requested the drive scope, so the
+  userinfo lookup in onDriveSignedIn() had no permission to read the
+  signed-in account's email and came back with an empty email field —
+  which the mismatch check then (wrongly) treated as "not
+  sean@oakjoinery.co.za" and disconnected him, even though Google's own
+  consent screen confirmed the correct account signed in. Added the
+  userinfo.email scope alongside drive so the check has something real
+  to compare. Anyone with an already-open tab needs a hard reload for
+  this — DRIVE_SCOPE is read once when the token client is built.
 - 2026-09-16 (later still #4): Removed the forced Google account
   chooser (prompt: 'select_account') added earlier the same day — per
   user follow-up that other staff also use this app but don't have
@@ -798,7 +808,10 @@ GOOGLE DRIVE (PDF archiving only — NOT board data sync)
   origin_mismatch or "Access blocked" after a Client ID gets pasted in,
   first confirm the ID's leading number matches project number
   841117816256 before touching Console settings.
-- Scope requested: https://www.googleapis.com/auth/drive
+- Scope requested: https://www.googleapis.com/auth/drive AND
+  https://www.googleapis.com/auth/userinfo.email (email scope added
+  2026-09-16 — required for the account-restriction check below to
+  actually work; drive-only tokens can't read the account's email).
 - RESTRICTED TO ONE ACCOUNT (2026-09-16): only sean@oakjoinery.co.za can
   connect. Enforced in onDriveSignedIn() via a call to Google's
   oauth2/v3/userinfo endpoint right after any sign-in (manual connect
@@ -2925,7 +2938,16 @@ document.getElementById('notesBtn').addEventListener('click', viewAllNotes);
 document.getElementById('driveBtn').addEventListener('click', onDriveBtnClick);
 document.getElementById('syncBtn').addEventListener('click', openSyncSettings);
 
-const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive';
+// FIXED 2026-09-16: was just the drive scope. The account-restriction
+// check added earlier the same day calls Google's userinfo endpoint to
+// read WHICH email signed in — but a token scoped to drive-only isn't
+// authorized to read the account's email, so userinfo silently came
+// back with no email field, and onDriveSignedIn() treated that missing
+// email as "not the right account" and disconnected sean@oakjoinery.co.za
+// even when Google's own consent screen showed him signing in
+// correctly. Adding the email scope is what actually lets the app read
+// the account it just got a token for.
+const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/userinfo.email';
 
 function updateDriveUi(){
   const dot = document.getElementById('driveDot');
