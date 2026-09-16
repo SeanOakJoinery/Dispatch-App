@@ -17,6 +17,35 @@ batched up later. Also update the relevant reference section below
 ========================================================================
 CHANGELOG (most recent first — add a new dated entry after every change)
 ========================================================================
+- 2026-09-16 (later still): Fixed a real bug found while debugging the
+  Client ID switch above: ensureTokenClient() cached `tokenClient` on
+  first build and returned that SAME cached object forever afterward,
+  regardless of drive.clientId changing later. Practical effect: user
+  pasted the new, correct Client ID into the Drive modal and clicked
+  Connect, but the Google sign-in popup's URL still showed the old
+  client_id — because saveClientIdAndConnect() → connectDrive() →
+  ensureTokenClient() just handed back the stale client built during an
+  earlier tryAutoReconnectDrive() call on page load (which ran with
+  whatever clientId was already in storage at the time). Fix: tag the
+  cached client with the clientId it was built for
+  (tokenClient.__builtForClientId) and rebuild whenever drive.clientId
+  no longer matches. Anyone who already has this app open with a stale
+  tokenClient needs a hard page reload for this fix itself to load —
+  reloading was ALWAYS required for a Client ID change to work even
+  before this fix existed, this bug is what silently broke that.
+- 2026-09-16 (later): Diagnosed and fixed the "origin_mismatch" /
+  "Access blocked" errors user hit trying to connect Google Drive.
+  Root cause: the Client ID referenced in this file's GOOGLE DRIVE
+  section (137392962022-ru70dura...) belongs to a Cloud project the
+  user does NOT have console access to — its leading project number
+  didn't match "oak-joinery-stock" (841117816256), so every attempt to
+  add the app's GitHub Pages origin (https://seanoakjoinery.github.io)
+  in Console was silently landing on the wrong client. Fix: created a
+  new Web application OAuth Client ("Oak Dispatch Web") inside
+  oak-joinery-stock itself, with that origin authorized from the start.
+  See updated GOOGLE DRIVE section below for the new Client ID — user
+  needs to paste it into the app's Drive settings modal (it's not
+  hardcoded in code, just persisted from whatever's typed in).
 - 2026-09-16: Google Drive connect now forces the account chooser
   (prompt: 'select_account consent' instead of just 'consent'), per user
   report that clicking Connect silently signed in with whatever personal
@@ -717,7 +746,25 @@ BOARD DATA SYNC (Firebase Realtime Database)
 
 GOOGLE DRIVE (PDF archiving only — NOT board data sync)
 - OAuth Client ID (public, safe to reuse):
-  137392962022-ru70duraegsu9r0v9oacglonndlg6b5q.apps.googleusercontent.com
+  841117816256-69c0vmf1oeo4t2redms4f3ri2reg6bk8.apps.googleusercontent.com
+  (Web application client "Oak Dispatch Web", created 2026-09-16 in the
+  "oak-joinery-stock" Cloud project — the one the user actually has
+  console access to. Authorized JavaScript origin:
+  https://seanoakjoinery.github.io — GitHub Pages origins are per
+  username, NOT per repo, so this covers every repo/app hosted under
+  that username, path is irrelevant.)
+  SUPERSEDES an older Client ID, 137392962022-ru70duraegsu9r0v9oacglonndlg6b5q
+  .apps.googleusercontent.com, referenced in earlier versions of this
+  file and in chat history before 2026-09-16 — that ID's project number
+  (137392962022) does NOT match "oak-joinery-stock" (project number
+  841117816256), meaning it belongs to some OTHER Google Cloud project
+  the user doesn't have console access to (or never did). That mismatch
+  is exactly why adding the GitHub Pages origin kept failing with
+  "origin_mismatch" no matter how it was added — the origin was being
+  added to the WRONG client/project. If Drive ever breaks again with
+  origin_mismatch or "Access blocked" after a Client ID gets pasted in,
+  first confirm the ID's leading number matches project number
+  841117816256 before touching Console settings.
 - Scope requested: https://www.googleapis.com/auth/drive
 - Google Drive is used for exactly ONE thing: when a delivery note is
   locked, "Save to Drive" (saveDispatchRecordToDrive/manualSaveRecord)
@@ -729,6 +776,7 @@ GOOGLE DRIVE (PDF archiving only — NOT board data sync)
   account that signs in (owner + driver, if they need it) must be added
   under Google Auth Platform > Audience > Test users first, or sign-in
   fails with "Access blocked". Real Console step, not fixable in code.
+  sean@oakjoinery.co.za is already added as of 2026-09-16.
 - drive.fileId was REMOVED from persisted state (Aug 2026) — it used
   to point at the board's Drive JSON file, which no longer exists.
   Persisted drive state is now just {clientId}.
@@ -2881,7 +2929,14 @@ function ensureTokenClient(){
   if(!window.google || !google.accounts || !google.accounts.oauth2){
     return null;
   }
-  if(tokenClient) return tokenClient;
+  // FIXED 2026-09-16: was `if(tokenClient) return tokenClient;` — this
+  // silently kept reusing a token client built with a PREVIOUS
+  // drive.clientId forever, so pasting in a new/corrected Client ID and
+  // clicking Connect had no effect: Google's sign-in popup kept using
+  // the old client_id in its URL because tokenClient was never rebuilt.
+  // Now it rebuilds whenever drive.clientId no longer matches what the
+  // cached client was built with.
+  if(tokenClient && tokenClient.__builtForClientId === drive.clientId) return tokenClient;
   tokenClient = google.accounts.oauth2.initTokenClient({
     client_id: drive.clientId,
     scope: DRIVE_SCOPE,
@@ -2894,6 +2949,7 @@ function ensureTokenClient(){
       onDriveSignedIn();
     }
   });
+  tokenClient.__builtForClientId = drive.clientId;
   return tokenClient;
 }
 
