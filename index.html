@@ -17,6 +17,19 @@ batched up later. Also update the relevant reference section below
 ========================================================================
 CHANGELOG (most recent first — add a new dated entry after every change)
 ========================================================================
+- 2026-09-16 (later still #2): Replaced the generic "N items handed to
+  the driver — view under Delivery notes" line under the Dispatched
+  column with one clickable line PER note still waiting on a site
+  signature, e.g. "DN-0001 still needs site signature" — per user
+  request ("under dispatch i want a note saying this dispatch note
+  needs to be signt by client for example Delivery note 001 still
+  neads site signutare"). Clicking a line opens that note directly
+  (viewNote). Only lists notes where driverSignature is set AND
+  isNoteComplete() is false — a collection note never appears here
+  since its one signature already completes it. New .archived-note-hint
+  CSS class just adds an underline + hover color, reusing the existing
+  #archivedHint container/logic (same place archivedCount was computed
+  in render(), just changed what's rendered into it).
 - 2026-09-16 (later still): Fixed a real bug found while debugging the
   Client ID switch above: ensureTokenClient() cached `tokenClient` on
   first build and returned that SAME cached object forever afterward,
@@ -1164,6 +1177,7 @@ WHEN THE USER UPLOADS THIS FILE AGAIN
   .drive-dot.on{background:var(--green);}
   .drive-dot.syncing{background:var(--amber);}
   .drive-dot.err{background:var(--rust);}
+  .archived-note-hint:hover{color:var(--ink,#333);}
 
   .login-overlay{position:fixed;inset:0;background:var(--bg,#14110c);display:flex;align-items:center;justify-content:center;z-index:200;padding:20px;}
   .login-card{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:28px;width:100%;max-width:360px;}
@@ -1742,8 +1756,21 @@ function render(){
 
   const hintEl = document.getElementById('archivedHint');
   if(hintEl){
-    if(archivedCount > 0){
-      hintEl.textContent = `${archivedCount} item${archivedCount === 1 ? '' : 's'} handed to the driver — view under "Delivery notes"`;
+    // CHANGED 2026-09-16 per user request ("under dispatch i want a note
+    // saying this dispatch note needs to be signt by client for example
+    // Delivery note 001 still neads site signutare") — was just a plain
+    // count ("3 items handed to the driver..."), now lists each
+    // individual note still waiting on a site signature by its number,
+    // each clickable straight into that note. A collection note never
+    // appears here since its single signature already completes it
+    // (isNoteComplete true the moment it's signed), so this only ever
+    // lists two-signature notes where the driver has signed but the
+    // site/client hasn't yet.
+    const waitingOnSite = state.notes.filter(n => n.driverSignature && !isNoteComplete(n));
+    if(waitingOnSite.length > 0){
+      hintEl.innerHTML = waitingOnSite
+        .map(n => `<div class="archived-note-hint" onclick="viewNote('${n.id}')" style="cursor:pointer;text-decoration:underline;">${escHtml(n.number)} still needs site signature</div>`)
+        .join('');
       hintEl.style.display = 'block';
     } else {
       hintEl.style.display = 'none';
