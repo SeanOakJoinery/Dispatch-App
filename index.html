@@ -17,6 +17,15 @@ batched up later. Also update the relevant reference section below
 ========================================================================
 CHANGELOG (most recent first — add a new dated entry after every change)
 ========================================================================
+- 2026-09-16: Google Drive connect now forces the account chooser
+  (prompt: 'select_account consent' instead of just 'consent'), per user
+  report that clicking Connect silently signed in with whatever personal
+  Gmail account happened to already be signed into that browser, instead
+  of the intended work account — Google was skipping the chooser
+  because only one account was logged into that browser session.
+  connectDrive() is the only place this changed; tryAutoReconnectDrive()
+  deliberately keeps prompt: '' since silent reconnect on load should
+  NOT interrupt with a picker.
 - 2026-09-11 (later #4): PER-APP ACCESS CONTROL, per user request ("add
   a section where i can chose witch user can use witch app and there
   name only shows on that app and main root can acses all apps and add
@@ -2895,7 +2904,11 @@ function connectDrive(){
     return;
   }
   setDriveStatus('syncing');
-  tc.requestAccessToken({ prompt: 'consent' });
+  // 'select_account' forces Google's account chooser to show every time,
+  // instead of silently using whichever Google account happens to be
+  // signed into the browser — user hit this exact problem (2026-09-16):
+  // it grabbed a personal Gmail account instead of the intended one.
+  tc.requestAccessToken({ prompt: 'select_account consent' });
 }
 
 function tryAutoReconnectDrive(){
