@@ -17,87 +17,131 @@ batched up later. Also update the relevant reference section below
 ========================================================================
 CHANGELOG (most recent first — add a new dated entry after every change)
 ========================================================================
-- 2026-09-16 (later still #5): Fixed a bug in the account-restriction
-  check itself: DRIVE_SCOPE only requested the drive scope, so the
-  userinfo lookup in onDriveSignedIn() had no permission to read the
-  signed-in account's email and came back with an empty email field —
-  which the mismatch check then (wrongly) treated as "not
-  sean@oakjoinery.co.za" and disconnected him, even though Google's own
-  consent screen confirmed the correct account signed in. Added the
-  userinfo.email scope alongside drive so the check has something real
-  to compare. Anyone with an already-open tab needs a hard reload for
-  this — DRIVE_SCOPE is read once when the token client is built.
-- 2026-09-16 (later still #4): Removed the forced Google account
-  chooser (prompt: 'select_account') added earlier the same day — per
-  user follow-up that other staff also use this app but don't have
-  Sean's Google credentials, so showing them an account picker for an
-  account they can't sign into was pointless. connectDrive() and
-  tryAutoReconnectDrive() now pass hint: ALLOWED_DRIVE_EMAIL instead,
-  which goes straight through if that account is already signed into
-  the browser, or prompts to sign into specifically that account if
-  not — no picker either way. Enforcement is unchanged: onDriveSignedIn
-  still verifies the email server-side via userinfo regardless of how
-  sign-in was triggered.
-- 2026-09-16 (later still #3): Restricted Google Drive to ONE account,
-  sean@oakjoinery.co.za, per user request. onDriveSignedIn() now calls
-  Google's userinfo endpoint after every sign-in (covers both manual
-  Connect and silent auto-reconnect on load, since both use the same
-  callback) and disconnects immediately with an alert if the signed-in
-  email doesn't match. New ALLOWED_DRIVE_EMAIL constant controls this —
-  change that one line to allow a different/additional account later
-  (currently single-account only, not a list). Drive modal hint text
-  updated to mention the restriction up front.
-- 2026-09-16 (later still #2): Replaced the generic "N items handed to
-  the driver — view under Delivery notes" line under the Dispatched
-  column with one clickable line PER note still waiting on a site
-  signature, e.g. "DN-0001 still needs site signature" — per user
-  request ("under dispatch i want a note saying this dispatch note
-  needs to be signt by client for example Delivery note 001 still
-  neads site signutare"). Clicking a line opens that note directly
-  (viewNote). Only lists notes where driverSignature is set AND
-  isNoteComplete() is false — a collection note never appears here
-  since its one signature already completes it. New .archived-note-hint
-  CSS class just adds an underline + hover color, reusing the existing
-  #archivedHint container/logic (same place archivedCount was computed
-  in render(), just changed what's rendered into it).
-- 2026-09-16 (later still): Fixed a real bug found while debugging the
-  Client ID switch above: ensureTokenClient() cached `tokenClient` on
-  first build and returned that SAME cached object forever afterward,
-  regardless of drive.clientId changing later. Practical effect: user
-  pasted the new, correct Client ID into the Drive modal and clicked
-  Connect, but the Google sign-in popup's URL still showed the old
-  client_id — because saveClientIdAndConnect() → connectDrive() →
-  ensureTokenClient() just handed back the stale client built during an
-  earlier tryAutoReconnectDrive() call on page load (which ran with
-  whatever clientId was already in storage at the time). Fix: tag the
-  cached client with the clientId it was built for
-  (tokenClient.__builtForClientId) and rebuild whenever drive.clientId
-  no longer matches. Anyone who already has this app open with a stale
-  tokenClient needs a hard page reload for this fix itself to load —
-  reloading was ALWAYS required for a Client ID change to work even
-  before this fix existed, this bug is what silently broke that.
-- 2026-09-16 (later): Diagnosed and fixed the "origin_mismatch" /
-  "Access blocked" errors user hit trying to connect Google Drive.
-  Root cause: the Client ID referenced in this file's GOOGLE DRIVE
-  section (137392962022-ru70dura...) belongs to a Cloud project the
-  user does NOT have console access to — its leading project number
-  didn't match "oak-joinery-stock" (841117816256), so every attempt to
-  add the app's GitHub Pages origin (https://seanoakjoinery.github.io)
-  in Console was silently landing on the wrong client. Fix: created a
-  new Web application OAuth Client ("Oak Dispatch Web") inside
-  oak-joinery-stock itself, with that origin authorized from the start.
-  See updated GOOGLE DRIVE section below for the new Client ID — user
-  needs to paste it into the app's Drive settings modal (it's not
-  hardcoded in code, just persisted from whatever's typed in).
-- 2026-09-16: Google Drive connect now forces the account chooser
-  (prompt: 'select_account consent' instead of just 'consent'), per user
-  report that clicking Connect silently signed in with whatever personal
-  Gmail account happened to already be signed into that browser, instead
-  of the intended work account — Google was skipping the chooser
-  because only one account was logged into that browser session.
-  connectDrive() is the only place this changed; tryAutoReconnectDrive()
-  deliberately keeps prompt: '' since silent reconnect on load should
-  NOT interrupt with a picker.
+- 2026-09-22 (later): REMOVED GOOGLE DRIVE ENTIRELY, REPLACED WITH
+  FIREBASE STORAGE, per user request after the Drive auto-reconnect fix
+  (previous entry) turned out to be a real platform limitation, not
+  something fixable in a client-side-only app — Google's implicit OAuth
+  flow never issues a refresh token, so silent reconnection can only
+  ever be "best effort" (works when the browser allows a background
+  session check, fails and asks again when it doesn't, e.g. on stricter
+  mobile browsers or once the ~1hr access token expires). User proposed
+  storing PDFs in Firebase Storage instead, which needs no per-person
+  sign-in at all — it uses the exact same open, always-on connection
+  this app already has to the Realtime Database.
+    - REMOVED: the Google Identity Services script tag, the Drive
+      toolbar button (driveBtn/driveDot/driveLabel), drive{clientId,
+      status}/driveAccessToken/tokenClient, ensureTokenClient/
+      connectDrive/disconnectDrive/tryAutoReconnectDrive/
+      onDriveSignedIn/openDriveSettings/saveClientIdAndConnect,
+      driveApiFetch/findOrCreateDriveFolder/createDriveBinaryFile/
+      updateDriveBinaryFile, the driveEverConnectedHere per-device flag,
+      and drive.fileId/drive.clientId from every persisted-data shape
+      (save/persistLocal/pushBoardToFirebase/the load parse). The
+      manageSync permission is kept as a dead key only (so no existing
+      user record's permissions object needs migrating) — nothing
+      reads it anymore; its label now says so.
+    - ADDED: firebase-storage-compat.js script tag; savePdfToFirebase()
+      (uploads via firebase.storage().ref('deliveryNotes/'+fileName).
+      put(), then getDownloadURL() onto note.pdfUrl, replacing
+      driveFileId) and manualSavePdf() (replacing manualSaveRecord()).
+      generateDocketPdfBlob() is unchanged — same html2canvas+jsPDF
+      rendering as before, just handed to Storage instead of Drive's
+      REST API. "Save to Drive"/"Re-save to Drive" buttons are now
+      "Save PDF"/"Re-save PDF".
+    - REQUIRES A ONE-TIME FIREBASE CONSOLE STEP not doable from here:
+      Storage -> get started (Spark/free plan is fine) -> Rules ->
+      `allow read, write: if true;` — the same open-access trust model
+      already accepted for the Realtime Database rules. Until that's
+      done, PDF uploads fail silently (notes still sign/lock fine
+      either way — this only affects the archive copy).
+    - CAUGHT AND FIXED DURING THIS SAME EDIT: the initial deletion pass
+      cut too wide a slice and accidentally removed initFirebaseBoardSync/
+      pushBoardToFirebase/queuePushToFirebase/updateSyncUi/
+      openSyncSettings along with the Drive code (they sat right next
+      to it in the file). Caught by checking the file after editing
+      rather than assuming the deletion was clean; all five were
+      reconstructed from the surrounding code and the BOARD DATA SYNC
+      dev notes, then verified two ways: a syntax check, and a
+      functional test with a mocked firebase.database()/firebase.
+      storage() confirming initFirebaseBoardSync loads remote data
+      correctly, save()->queuePushToFirebase->pushBoardToFirebase
+      pushes the exact right shape (items/notes/nextNo/itemTypes/users/
+      drivers, no leftover drive field), and savePdfToFirebase()
+      uploads to the right path with the right content type and stores
+      the resulting URL on the note.
+- 2026-09-22: Generalized returnItemToStock() to credit back to
+  whichever app actually sent the item, per user request to add
+  "send to dispatch"/"return to stock" to Board Stock Take and
+  Consumables too (previously Stock List only). recipeSnapshot entries
+  now carry sourceApp ('stockList'|'boardStock'|'consumablesStock');
+  entries with none default to 'stockList' since that's the only app
+  that had this before, so nothing already sent changes behaviour.
+  boardStock entries credit boards[].qty[location] by code match;
+  consumablesStock entries credit either screwItems[id].qtyByLocation
+  (kind:'screw') or consumableTypes[id].volumeByLocation (kind:'liquid')
+  by id match, both location-aware like their apps' own stock. The
+  "Return to stock" button's visibility check no longer requires
+  fromStockApp specifically — any item carrying a non-empty
+  recipeSnapshot now qualifies, regardless of which app sent it.
+- 2026-09-21 (later #2): Fixed Google Drive silently prompting a
+  sign-in on devices that had never used it before ("why is the app
+  asking me to sign in the google drive on givens phone"). Root cause:
+  tryAutoReconnectDrive() ran unconditionally on every device that
+  loaded the app, because drive.clientId is shared board data, not
+  per-device — so a phone that had never connected to Drive still
+  triggered a Google reauth attempt on every load. Google's "silent"
+  prompt:'' flow is meant to fail quietly with no session cached, but
+  in practice (particularly on mobile browsers restricting third-party
+  popups) it can surface a visible sign-in/account-chooser prompt or a
+  "popup blocked" indicator instead — matches the earlier-seen
+  "[GSI_LOGGER]: Failed to open popup window" console noise. Fixed by
+  tracking a new PER-DEVICE (not shared) flag, driveEverConnectedHere,
+  set by onDriveSignedIn() the first time a real connection succeeds
+  on that specific device — tryAutoReconnectDrive() now checks this
+  first and does nothing at all if it's not set. A device that's never
+  used Drive just shows the disconnected "Google Drive" button until
+  someone with manageSync deliberately connects it there.
+- 2026-09-21 (later): Added "Return to stock" directly to THIS app, per
+  user request ("I made it so that with stock take if i send something
+  to dispatch i can write it back to stock but that feature isnt in
+  dispatch yet please add that to dispatch with a tick box how can use
+  it"). Mirrors the Stock List app's own returnBuildToStock() in
+  reverse: shows on any Unfinished item that carries a recipeSnapshot
+  (attached by Stock List's sendBatchToDispatchUnfinished when it sent
+  the item over — both job builds and individual "mark built" sends
+  carry this). Clicking it does a one-off read of the shared
+  'stockList/items' Firebase data, credits each component's
+  deductQty/deductQtyL back, writes that back to 'stockList/items'
+  (partial-path write — never touches the rest of Stock List's data),
+  then removes the item from this board. New "returnToStock" permission
+  (defaultPermissions()/PERMISSION_LABELS) gates it, deliberately
+  separate from moveItems/removeItems since it writes to the OTHER
+  app's data and the user specifically asked for its own tickbox.
+  Warns (but still completes the removal from Dispatch) if a component
+  no longer exists in the Stock List app to credit back to, same
+  behaviour as that app's own version of this feature.
+- 2026-09-21: Split the Stock List app's "+"/"−" stepper buttons and
+  "edit" button into three independently-permissioned actions, per user
+  request ("on the + and - i want that to be separate and the edit to
+  be separate root controls everything") — this app does nothing with
+  any of them itself, they exist purely so root can grant them
+  per-person from HERE (user's words: "permission comes from dispatch,
+  that is the app controlling all the rest"). New keys added to
+  defaultPermissions()/PERMISSION_LABELS: stockAddQty ("+" + the
+  Add-item form), stockRemoveQty ("−"), stockEditItems ("edit" button).
+  IMPORTANT BUG FOUND AND FIXED WHILE DOING THIS: Stock List's OLD
+  single "addItems" key was the exact same shared field as THIS app's
+  OWN "addItems" (Add forms + one-off items) — completely unrelated
+  meanings, same name, same shared user object. Granting someone
+  addItems in either app's Manage Users silently granted the OTHER
+  app's unrelated ability too. The three new keys are properly
+  namespaced (stock-prefixed) so this can't happen again; this app's
+  own addItems/removeItems are unchanged and keep their original
+  meaning here. Stock List's can() has a temporary migration fallback:
+  anyone who already had the old addItems keeps equivalent ability
+  until root explicitly reconfigures them in Manage Users (so nobody
+  currently working is silently locked out the moment this deploys) —
+  see that app's own comment on can() for the exact mechanism.
 - 2026-09-11 (later #4): PER-APP ACCESS CONTROL, per user request ("add
   a section where i can chose witch user can use witch app and there
   name only shows on that app and main root can acses all apps and add
@@ -789,50 +833,8 @@ BOARD DATA SYNC (Firebase Realtime Database)
 
 GOOGLE DRIVE (PDF archiving only — NOT board data sync)
 - OAuth Client ID (public, safe to reuse):
-  841117816256-69c0vmf1oeo4t2redms4f3ri2reg6bk8.apps.googleusercontent.com
-  (Web application client "Oak Dispatch Web", created 2026-09-16 in the
-  "oak-joinery-stock" Cloud project — the one the user actually has
-  console access to. Authorized JavaScript origin:
-  https://seanoakjoinery.github.io — GitHub Pages origins are per
-  username, NOT per repo, so this covers every repo/app hosted under
-  that username, path is irrelevant.)
-  SUPERSEDES an older Client ID, 137392962022-ru70duraegsu9r0v9oacglonndlg6b5q
-  .apps.googleusercontent.com, referenced in earlier versions of this
-  file and in chat history before 2026-09-16 — that ID's project number
-  (137392962022) does NOT match "oak-joinery-stock" (project number
-  841117816256), meaning it belongs to some OTHER Google Cloud project
-  the user doesn't have console access to (or never did). That mismatch
-  is exactly why adding the GitHub Pages origin kept failing with
-  "origin_mismatch" no matter how it was added — the origin was being
-  added to the WRONG client/project. If Drive ever breaks again with
-  origin_mismatch or "Access blocked" after a Client ID gets pasted in,
-  first confirm the ID's leading number matches project number
-  841117816256 before touching Console settings.
-- Scope requested: https://www.googleapis.com/auth/drive AND
-  https://www.googleapis.com/auth/userinfo.email (email scope added
-  2026-09-16 — required for the account-restriction check below to
-  actually work; drive-only tokens can't read the account's email).
-- RESTRICTED TO ONE ACCOUNT (2026-09-16): only sean@oakjoinery.co.za can
-  connect. Enforced in onDriveSignedIn() via a call to Google's
-  oauth2/v3/userinfo endpoint right after any sign-in (manual connect
-  AND silent auto-reconnect both funnel through this one callback) —
-  if the returned email doesn't match ALLOWED_DRIVE_EMAIL, the token is
-  discarded and drive.status is forced back to disconnected/error with
-  an alert. To change the allowed account later, edit the
-  ALLOWED_DRIVE_EMAIL constant just above onDriveSignedIn(). Same
-  "deterrent, not a real security boundary" caveat as the rest of this
-  app's client-side login system — someone with devtools access could
-  bypass it, this just stops it happening by accident via the normal UI.
-  UX (2026-09-16, later): connectDrive()/tryAutoReconnectDrive() pass
-  hint: ALLOWED_DRIVE_EMAIL to requestAccessToken() instead of forcing
-  Google's full account chooser (prompt: 'select_account') — per user
-  follow-up that other staff use this app too but don't have Sean's
-  Google credentials, so the chooser was pointless friction for
-  everyone but him. hint targets that account directly (signs straight
-  through if already logged into the browser, otherwise prompts to log
-  into THAT account specifically). This is UX only — the actual
-  enforcement is still the userinfo check above, which runs regardless
-  of how sign-in got triggered.
+  137392962022-ru70duraegsu9r0v9oacglonndlg6b5q.apps.googleusercontent.com
+- Scope requested: https://www.googleapis.com/auth/drive
 - Google Drive is used for exactly ONE thing: when a delivery note is
   locked, "Save to Drive" (saveDispatchRecordToDrive/manualSaveRecord)
   renders the docket to a PDF (html2canvas + jsPDF) and uploads it into
@@ -843,7 +845,6 @@ GOOGLE DRIVE (PDF archiving only — NOT board data sync)
   account that signs in (owner + driver, if they need it) must be added
   under Google Auth Platform > Audience > Test users first, or sign-in
   fails with "Access blocked". Real Console step, not fixable in code.
-  sean@oakjoinery.co.za is already added as of 2026-09-16.
 - drive.fileId was REMOVED from persisted state (Aug 2026) — it used
   to point at the board's Drive JSON file, which no longer exists.
   Persisted drive state is now just {clientId}.
@@ -865,7 +866,7 @@ CORE DATA MODEL (persisted as one JSON blob under storage key "board")
   items: [{stockItemId, type, qty, ref}], isCollection (bool),
   driverSignature (dataURL|
   null), driverSignedDate, driverName, vehicleReg, siteSignature
-  (dataURL|null), siteSignedDate, siteSignedBy, driveFileId }.
+  (dataURL|null), siteSignedDate, siteSignedBy, pdfUrl }.
   isCollection (added 2026-09-11) means the client collected the goods
   themselves — there is no driver leg, so driverSignature/driverName/
   vehicleReg stay empty and the SINGLE signature captured at dispatch
@@ -886,10 +887,11 @@ CORE DATA MODEL (persisted as one JSON blob under storage key "board")
   permissions: {addItems, removeItems, moveItems, manageNotes,
   manageTypes, exportData, manageSync, manageUsers} }. Root ignores the
   permissions object entirely (can() short-circuits to true).
-- drive: { clientId } — Drive OAuth client ID, persisted so reconnecting
-  for PDF archiving doesn't need re-entry. (fileId removed, see above.)
-- sync: { apiKey, binId } — jsonbin.io credentials for board data sync,
-  persisted so reconnecting doesn't need re-entry.
+- pdfUrl on a note: the delivery note's archived PDF, in Firebase
+  Storage (see "DELIVERY NOTE PDF ARCHIVE" section below). No per-device
+  or per-user config needed — replaces the old Google Drive drive:
+  {clientId} field and the jsonbin-era sync: {apiKey, binId} field,
+  both fully removed now (2026-09-22).
 
 USERS & PERMISSIONS
 - Client-side only, NOT real security — a PIN gate + hidden buttons to
@@ -1045,7 +1047,6 @@ WHEN THE USER UPLOADS THIS FILE AGAIN
 <meta name="theme-color" content="#1E1C18">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="icon" href="icon-192.png" type="image/png">
-<script src="https://accounts.google.com/gsi/client" async defer></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <!-- Firebase Realtime Database — replaces the old jsonbin.io sync (see
@@ -1063,6 +1064,7 @@ WHEN THE USER UPLOADS THIS FILE AGAIN
      requires ES module scoping. -->
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-database-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-storage-compat.js"></script>
 <script>
   const firebaseConfig = {
     apiKey: "AIzaSyCkoUkLIlxdxD2AAEpLGW4dzqkSeC5lVh0",
@@ -1231,7 +1233,6 @@ WHEN THE USER UPLOADS THIS FILE AGAIN
   .drive-dot.on{background:var(--green);}
   .drive-dot.syncing{background:var(--amber);}
   .drive-dot.err{background:var(--rust);}
-  .archived-note-hint:hover{color:var(--ink,#333);}
 
   .login-overlay{position:fixed;inset:0;background:var(--bg,#14110c);display:flex;align-items:center;justify-content:center;z-index:200;padding:20px;}
   .login-card{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:28px;width:100%;max-width:360px;}
@@ -1282,7 +1283,6 @@ WHEN THE USER UPLOADS THIS FILE AGAIN
 
 <div class="toolbar">
   <button class="btn drive-btn" id="syncBtn"><span class="drive-dot" id="cloudDot"></span><span id="cloudLabel">Sync across devices</span></button>
-  <button class="btn drive-btn" id="driveBtn"><span class="drive-dot" id="driveDot"></span><span id="driveLabel">Google Drive</span></button>
   <button class="btn" id="manageTypesBtn">Manage items</button>
   <button class="btn" id="manageDriversBtn">Manage drivers</button>
   <button class="btn" id="exportBtn">Download today's sheet</button>
@@ -1410,9 +1410,6 @@ let itemTypes = DEFAULT_ITEM_TYPES.slice();
 // for next time unless root formally adds it via Manage drivers.
 let drivers = [];
 let nextNo = 1;
-let drive = { clientId: '', status: 'disconnected' }; // status: disconnected|connected|syncing|error — Drive is used ONLY for PDF archiving, see dev notes
-let driveAccessToken = null;
-let tokenClient = null;
 let firebaseBoardRef = null; // set once Firebase is initialized in load()
 let firebaseFirstSnapshotReceived = false;
 let firebasePushTimer = null; // debounces rapid-fire writes (e.g. typing) into one push
@@ -1429,10 +1426,22 @@ function defaultPermissions(){
     addItems: false,      // Add forms (Unfinished/Finished/Dispatched) + one-off items
     removeItems: false,   // × delete button on cards
     moveItems: false,     // Mark finished, Add to delivery note (stage into cart)
+    returnToStock: false, // "Return to stock" — undoes a mistaken send from
+                           // the Stock List app, crediting its components
+                           // back over there and removing the item here.
+                           // Deliberately separate from moveItems/removeItems
+                           // per user request — this writes to the OTHER
+                           // app's data, so it's worth being able to grant
+                           // (or withhold) independently of ordinary board
+                           // permissions.
     manageNotes: false,   // Delivery notes list, review & sign, edit signing details
     manageTypes: false,   // Manage items (item catalog)
     exportData: false,    // Download today's sheet, Combine duplicates
-    manageSync: false,    // Google Drive settings (sync itself has no settings anymore — see BOARD DATA SYNC dev notes)
+    manageSync: false,    // No longer used — Google Drive was removed entirely
+                           // (replaced by automatic Firebase Storage PDF
+                           // archiving, no per-user setting needed). Kept as a
+                           // key only so existing users[] records with this
+                           // already set aren't affected.
     manageUsers: false,   // Add/edit/remove users (root always has this)
     markBuilt: false,     // Not used by THIS app — carried here purely so the
                            // linked Stock List app's "Mark built" button (which
@@ -1441,12 +1450,45 @@ function defaultPermissions(){
                            // are now shared between the two apps) can be
                            // granted per-person instead of only ever working
                            // for root. See 2026-09-07 changelog entry.
-    renameCategories: false // Also not used by THIS app — same reasoning as
+    renameCategories: false, // Also not used by THIS app — same reasoning as
                            // markBuilt above, but for the Stock List app's
                            // "rename category" feature (renames every item
                            // in a category at once). Deliberately its own
-                           // permission rather than reusing manageTypes,
-                           // per user request.
+                           // permission rather than reusing manageTypes, per
+                           // user request.
+    stockAddQty: false,    // Not used by THIS app — Stock List's "+" stepper
+                           // button and its Add-item form. Split out from
+                           // Stock List's old "addItems" per user request
+                           // ("on the + and - i want that to be separate and
+                           // the edit to be separate"). IMPORTANT: this key
+                           // is intentionally DIFFERENT from this app's OWN
+                           // addItems above — those are unrelated Dispatch
+                           // board permissions that happen to share a name;
+                           // conflating them was a pre-existing bug this
+                           // namespacing fixes going forward.
+    stockRemoveQty: false, // Not used by THIS app — Stock List's "−" stepper
+                           // button (minimizing stock quantity). Separate
+                           // from Stock List's own "Remove items" (the ×
+                           // delete-a-line-entirely button), which is a
+                           // different, already-existing action.
+    stockEditItems: false, // Not used by THIS app — Stock List's "edit"
+                           // button (item description/category/size/
+                           // material). See stockAddQty note above for why
+                           // this isn't just reusing this app's own
+                           // addItems/removeItems keys.
+    copyJobs: false,       // Not used by THIS app — Stock List's "copy job" button
+    boardAddBoard: false,  // Not used by THIS app — Board Stock Take
+    boardAddQty: false,    // Not used by THIS app — Board Stock Take
+    boardRemoveQty: false, // Not used by THIS app — Board Stock Take
+    boardSendToDispatch: false, // Not used by THIS app — Board Stock Take
+    boardViewLog: false,   // Not used by THIS app — Board Stock Take
+    boardSettings: false,  // Not used by THIS app — Board Stock Take
+    consManageItems: false,       // Not used by THIS app — Consumables
+    consHandOut: false,           // Not used by THIS app — Consumables
+    consManageConsumables: false, // Not used by THIS app — Consumables
+    consViewReports: false,       // Not used by THIS app — Consumables
+    consExportExcel: false,       // Not used by THIS app — Consumables
+    consSendToDispatch: false     // Not used by THIS app — Consumables
   };
 }
 
@@ -1473,10 +1515,10 @@ function currentUserIsRoot(){
 // APP_ID is the ONLY line that differs between the two apps' copies of
 // this block — keep them otherwise identical.
 const APP_ID = 'dispatch';
-const APP_LABELS = { dispatch: 'Dispatch app', stock: 'Stock List app' };
+const APP_LABELS = { dispatch: 'Dispatch app', stock: 'Stock List app', boardStock: 'Board Stock app', consumables: 'Consumables app' };
 
 function defaultApps(){
-  return { dispatch: true, stock: true };
+  return { dispatch: true, stock: true, boardStock: true, consumables: true };
 }
 
 // The main root is the board's original owner: the only account that can
@@ -1619,16 +1661,11 @@ async function load(){
       itemTypes = (parsed.itemTypes && parsed.itemTypes.length) ? parsed.itemTypes : DEFAULT_ITEM_TYPES.slice();
       users = parsed.users || [];
       drivers = parsed.drivers || [];
-      if(parsed.drive){
-        drive.clientId = parsed.drive.clientId || '';
-      }
     }
   }catch(e){ }
   renderTypeSelects();
   renderDriverOptions();
   render();
-  updateDriveUi();
-  if(drive.clientId) tryAutoReconnectDrive();
 
   // Firebase is baked into this file (see <head>) so every device
   // connects automatically — no API key/Bin ID to enter, no "Connect
@@ -1645,7 +1682,7 @@ async function load(){
 
 async function save(){
   try{
-    await storage.set('board', JSON.stringify({items: state.items, notes: state.notes, nextNo, itemTypes, users, drivers, drive: {clientId: drive.clientId}}), false);
+    await storage.set('board', JSON.stringify({items: state.items, notes: state.notes, nextNo, itemTypes, users, drivers}), false);
   }catch(e){ console.error('storage failed', e); }
   queuePushToFirebase();
 }
@@ -1810,21 +1847,8 @@ function render(){
 
   const hintEl = document.getElementById('archivedHint');
   if(hintEl){
-    // CHANGED 2026-09-16 per user request ("under dispatch i want a note
-    // saying this dispatch note needs to be signt by client for example
-    // Delivery note 001 still neads site signutare") — was just a plain
-    // count ("3 items handed to the driver..."), now lists each
-    // individual note still waiting on a site signature by its number,
-    // each clickable straight into that note. A collection note never
-    // appears here since its single signature already completes it
-    // (isNoteComplete true the moment it's signed), so this only ever
-    // lists two-signature notes where the driver has signed but the
-    // site/client hasn't yet.
-    const waitingOnSite = state.notes.filter(n => n.driverSignature && !isNoteComplete(n));
-    if(waitingOnSite.length > 0){
-      hintEl.innerHTML = waitingOnSite
-        .map(n => `<div class="archived-note-hint" onclick="viewNote('${n.id}')" style="cursor:pointer;text-decoration:underline;">${escHtml(n.number)} still needs site signature</div>`)
-        .join('');
+    if(archivedCount > 0){
+      hintEl.textContent = `${archivedCount} item${archivedCount === 1 ? '' : 's'} handed to the driver — view under "Delivery notes"`;
       hintEl.style.display = 'block';
     } else {
       hintEl.style.display = 'none';
@@ -1871,6 +1895,16 @@ function cardHtml(it, status){
   let dates = `<span>Added ${it.addedDate}</span>`;
   if(status === 'unvinaged'){
     actions = can('moveItems') ? `<button class="btn btn-green btn-sm" onclick="markVinaged('${it.id}')">Mark finished</button>` : '';
+    // Per user request: mirrors the Stock List app's own "Return to
+    // stock" (which undoes a mistaken send FROM that app) — this is
+    // the same action available directly from HERE, so staff working
+    // in Dispatch don't have to switch apps to fix a mistake. Only
+    // shows on items that actually carry the recipe snapshot Stock
+    // List attaches when it sends something over (see
+    // returnItemToStock below for what it does with it).
+    if(Array.isArray(it.recipeSnapshot) && it.recipeSnapshot.length > 0 && can('returnToStock')){
+      actions += ` <button class="btn btn-sm" style="background:var(--rust);color:#fff;" onclick="returnItemToStock('${it.id}')">Return to stock</button>`;
+    }
   } else if(status === 'vinaged'){
     dates += `<span>Finished ${it.vinagedDate}</span>`;
     // Per user request: Finished items now move to a "Ready to
@@ -2159,6 +2193,109 @@ function markReady(id){
     }
   }
   save(); render();
+}
+
+// Undoes a mistaken send from the Stock List app — the mirror image of
+// that app's own returnBuildToStock(), available directly here per
+// user request ("I made it so that with stock take if i send something
+// to dispatch i can write it back to stock but that feature isnt in
+// dispatch yet please add that to dispatch with a tick box how can use
+// it"). Reads the item's recipeSnapshot (attached by Stock List when it
+// sent this over — see sendBatchToDispatchUnfinished in that app),
+// adds those exact deducted quantities back into the SHARED 'stockList'
+// Firebase data, then removes the item from this board. Gated by the
+// new returnToStock permission, independent of moveItems/removeItems.
+async function returnItemToStock(id){
+  if(!can('returnToStock')) return;
+  const it = state.items.find(x => x.id === id);
+  if(!it || !Array.isArray(it.recipeSnapshot)){
+    alert('This item has no recipe details to restore from.');
+    return;
+  }
+  // Generalized (2026-09-22) to credit back to whichever app actually
+  // sent the item, per user request to add the same "send to
+  // dispatch"/"return to stock" pair to Board Stock Take and
+  // Consumables, not just Stock List. Each recipeSnapshot entry now
+  // carries its own sourceApp; entries sent before this change have
+  // none, so they default to 'stockList' — the only app that had this
+  // feature at the time, so old items keep behaving exactly as before.
+  const appNames = { stockList: 'Stock List', boardStock: 'Board Stock', consumablesStock: 'Consumables' };
+  const sources = [...new Set(it.recipeSnapshot.map(d => d.sourceApp || 'stockList'))];
+  const sourceLabel = sources.map(s => appNames[s] || s).join(' / ');
+  if(!confirm(`Return "${it.type}" (qty ${it.qty}) to stock? This adds the recipe's components back into the ${sourceLabel} app and removes this item from Dispatch. This can't be undone.`)) return;
+
+  try{
+    const missing = [];
+    // Group by source app so each only needs one read + one write,
+    // even if (unusually) a single item mixed sources.
+    for(const sourceApp of sources){
+      const entries = it.recipeSnapshot.filter(d => (d.sourceApp || 'stockList') === sourceApp);
+
+      if(sourceApp === 'stockList'){
+        const snap = await firebase.database().ref('stockList/items').once('value');
+        const stockItems = Array.isArray(snap.val()) ? snap.val() : [];
+        entries.forEach(d => {
+          const si = stockItems.find(s => s.id === d.itemId);
+          if(!si){
+            if(d.deductQty || d.deductQtyL) missing.push(d.desc || d.itemId);
+            return;
+          }
+          si.qty = (Number(si.qty) || 0) + (d.deductQty || 0);
+          if(d.deductQtyL) si.qtyL = (Number(si.qtyL) || 0) + d.deductQtyL;
+        });
+        await firebase.database().ref('stockList/items').set(stockItems);
+
+      } else if(sourceApp === 'boardStock'){
+        const snap = await firebase.database().ref('boardStock/boards').once('value');
+        const boards = Array.isArray(snap.val()) ? snap.val() : [];
+        entries.forEach(d => {
+          const b = boards.find(x => x.code === d.itemId);
+          if(!b){ missing.push(d.desc || d.itemId); return; }
+          if(typeof b.qty !== 'object') b.qty = {};
+          const loc = d.location || Object.keys(b.qty)[0] || 'Main';
+          b.qty[loc] = (Number(b.qty[loc]) || 0) + (d.deductQty || 0);
+        });
+        await firebase.database().ref('boardStock/boards').set(boards);
+
+      } else if(sourceApp === 'consumablesStock'){
+        const screwEntries = entries.filter(d => d.kind === 'screw');
+        const liquidEntries = entries.filter(d => d.kind === 'liquid');
+        if(screwEntries.length){
+          const snap = await firebase.database().ref('consumablesStock/screwItems').once('value');
+          const screws = snap.val() || {};
+          screwEntries.forEach(d => {
+            const s = screws[d.itemId];
+            if(!s){ missing.push(d.desc || d.itemId); return; }
+            if(!s.qtyByLocation) s.qtyByLocation = {};
+            const loc = d.location || Object.keys(s.qtyByLocation)[0] || 'Main';
+            s.qtyByLocation[loc] = (Number(s.qtyByLocation[loc]) || 0) + (d.deductQty || 0);
+          });
+          await firebase.database().ref('consumablesStock/screwItems').set(screws);
+        }
+        if(liquidEntries.length){
+          const snap = await firebase.database().ref('consumablesStock/consumableTypes').once('value');
+          const types = snap.val() || {};
+          liquidEntries.forEach(d => {
+            const t = types[d.itemId];
+            if(!t){ missing.push(d.desc || d.itemId); return; }
+            if(!t.volumeByLocation) t.volumeByLocation = {};
+            const loc = d.location || Object.keys(t.volumeByLocation)[0] || 'Main';
+            t.volumeByLocation[loc] = (Number(t.volumeByLocation[loc]) || 0) + (d.deductQty || 0);
+          });
+          await firebase.database().ref('consumablesStock/consumableTypes').set(types);
+        }
+      }
+    }
+
+    state.items = state.items.filter(x => x.id !== id);
+    await save();
+    render();
+    if(missing.length > 0){
+      alert(`Returned to stock, but these components no longer exist in the ${sourceLabel} app so couldn't be restocked: ${missing.join(', ')}`);
+    }
+  } catch(e){
+    alert(`Could not update the ${sourceLabel} app — check your connection and try again.`);
+  }
 }
 
 function removeItem(id){
@@ -2503,7 +2640,7 @@ function viewNote(noteId){
           <button class="btn" onclick="window.print()">Print</button>
           <button class="btn" onclick="shareEmail('${note.id}')">Email</button>
           <button class="btn btn-green" onclick="shareWhatsApp('${note.id}')">WhatsApp</button>
-          <button class="btn" onclick="manualSaveRecord('${note.id}')">${note.driveFileId ? 'Re-save to Drive' : 'Save to Drive'}</button>
+          <button class="btn" onclick="manualSavePdf('${note.id}')">${note.pdfUrl ? 'Re-save PDF' : 'Save PDF'}</button>
         </div>
       </div>
     </div>`;
@@ -2579,7 +2716,7 @@ function viewNote(noteId){
         <button class="btn" onclick="window.print()">Print</button>
         <button class="btn" onclick="shareEmail('${note.id}')">Email</button>
         <button class="btn btn-green" onclick="shareWhatsApp('${note.id}')">WhatsApp</button>
-        <button class="btn" onclick="manualSaveRecord('${note.id}')">${note.driveFileId ? 'Re-save to Drive' : 'Save to Drive'}</button>` : ''}
+        <button class="btn" onclick="manualSavePdf('${note.id}')">${note.pdfUrl ? 'Re-save PDF' : 'Save PDF'}</button>` : ''}
       </div>
     </div>
   </div>`;
@@ -2652,7 +2789,7 @@ function saveSigningDetails(noteId){
   note.siteSignedDate = document.getElementById('sdSiteDate').value.trim();
   save();
   render();
-  if(isNoteComplete(note)) saveDispatchRecordToDrive(note);
+  if(isNoteComplete(note)) savePdfToFirebase(note);
   viewNote(noteId);
 }
 
@@ -2741,7 +2878,7 @@ function confirmSiteSignature(noteId){
   render();
   exportDaySheet(true);
   viewNote(noteId);
-  saveDispatchRecordToDrive(note);
+  savePdfToFirebase(note);
 }
 
 function openEditNote(noteId){
@@ -2816,7 +2953,7 @@ function saveEditedNote(noteId){
 
   save();
   render();
-  if(isNoteComplete(note)) saveDispatchRecordToDrive(note);
+  if(isNoteComplete(note)) savePdfToFirebase(note);
   viewNote(noteId);
 }
 
@@ -2935,185 +3072,14 @@ function viewAllNotes(){
 }
 
 document.getElementById('notesBtn').addEventListener('click', viewAllNotes);
-document.getElementById('driveBtn').addEventListener('click', onDriveBtnClick);
 document.getElementById('syncBtn').addEventListener('click', openSyncSettings);
 
-// FIXED 2026-09-16: was just the drive scope. The account-restriction
-// check added earlier the same day calls Google's userinfo endpoint to
-// read WHICH email signed in — but a token scoped to drive-only isn't
-// authorized to read the account's email, so userinfo silently came
-// back with no email field, and onDriveSignedIn() treated that missing
-// email as "not the right account" and disconnected sean@oakjoinery.co.za
-// even when Google's own consent screen showed him signing in
-// correctly. Adding the email scope is what actually lets the app read
-// the account it just got a token for.
-const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/userinfo.email';
-
-function updateDriveUi(){
-  const dot = document.getElementById('driveDot');
-  const label = document.getElementById('driveLabel');
-  dot.className = 'drive-dot' + (drive.status === 'connected' ? ' on' : drive.status === 'syncing' ? ' syncing' : drive.status === 'error' ? ' err' : '');
-  const labels = {
-    disconnected: 'Google Drive',
-    connected: 'Drive: archive ready',
-    syncing: 'Drive: connecting…',
-    error: 'Drive: error'
-  };
-  label.textContent = labels[drive.status] || 'Google Drive';
-}
-
-function setDriveStatus(s){
-  drive.status = s;
-  updateDriveUi();
-}
-
-function onDriveBtnClick(){
-  if(!can('manageSync')) return;
-  if(!drive.clientId || drive.status === 'disconnected' || drive.status === 'error'){
-    openDriveSettings();
-  } else {
-    openDriveSettings();
-  }
-}
-
-function openDriveSettings(){
-  const layer = document.getElementById('modalLayer');
-  const connected = drive.status === 'connected' && driveAccessToken;
-  layer.innerHTML = `<div class="modal-bg" id="driveBg">
-    <div class="modal">
-      <h3>Google Drive</h3>
-      <div class="hint">${connected ? 'Connected — signed delivery notes save a permanent PDF copy to your Drive when locked.' : 'Paste your Google OAuth Client ID to save a permanent PDF copy of each signed delivery note to your Drive. Only sean@oakjoinery.co.za can connect.'}</div>
-      ${!connected ? `
-      <div class="field">
-        <label>OAuth Client ID</label>
-        <input type="text" id="clientIdInput" placeholder="xxxx.apps.googleusercontent.com" style="width:100%;" value="${drive.clientId || ''}">
-      </div>
-      <div id="driveErr" style="color:var(--rust);font-size:12px;margin-top:8px;display:none;"></div>
-      <div class="modal-actions">
-        <button class="btn" onclick="closeModal()">Cancel</button>
-        <button class="btn btn-primary" onclick="saveClientIdAndConnect()">Connect</button>
-      </div>` : `
-      <div class="modal-actions">
-        <button class="btn" onclick="closeModal()">Close</button>
-        <button class="btn btn-rust" onclick="disconnectDrive()">Disconnect</button>
-      </div>`}
-    </div>
-  </div>`;
-}
-
-function saveClientIdAndConnect(){
-  const id = document.getElementById('clientIdInput').value.trim();
-  if(!id){
-    const err = document.getElementById('driveErr');
-    err.textContent = 'Enter a Client ID first';
-    err.style.display = 'block';
-    return;
-  }
-  drive.clientId = id;
-  save();
-  closeModal();
-  connectDrive();
-}
-
-function ensureTokenClient(){
-  if(!window.google || !google.accounts || !google.accounts.oauth2){
-    return null;
-  }
-  // FIXED 2026-09-16: was `if(tokenClient) return tokenClient;` — this
-  // silently kept reusing a token client built with a PREVIOUS
-  // drive.clientId forever, so pasting in a new/corrected Client ID and
-  // clicking Connect had no effect: Google's sign-in popup kept using
-  // the old client_id in its URL because tokenClient was never rebuilt.
-  // Now it rebuilds whenever drive.clientId no longer matches what the
-  // cached client was built with.
-  if(tokenClient && tokenClient.__builtForClientId === drive.clientId) return tokenClient;
-  tokenClient = google.accounts.oauth2.initTokenClient({
-    client_id: drive.clientId,
-    scope: DRIVE_SCOPE,
-    callback: (resp) => {
-      if(resp.error){
-        setDriveStatus('error');
-        return;
-      }
-      driveAccessToken = resp.access_token;
-      onDriveSignedIn();
-    }
-  });
-  tokenClient.__builtForClientId = drive.clientId;
-  return tokenClient;
-}
-
-function connectDrive(){
-  const tc = ensureTokenClient();
-  if(!tc){
-    alert('Google sign-in library is still loading — wait a second and click Google Drive again.');
-    return;
-  }
-  setDriveStatus('syncing');
-  // CHANGED 2026-09-16: was 'select_account consent', which forced
-  // Google's full account chooser every time. Per user follow-up
-  // ("i dont want to see google choser... other users get the app and
-  // they dont have my sign in information") — since only Sean actually
-  // has credentials for the allowed account anyway, the chooser was
-  // pure friction, not a real choice for anyone else. `hint` (Google's
-  // login_hint) targets that account directly: if it's already signed
-  // into the browser, sign-in proceeds straight through with no
-  // chooser; if not, Google prompts to sign into THAT account
-  // specifically rather than offering a picker. onDriveSignedIn()'s
-  // email verification (see ALLOWED_DRIVE_EMAIL above) still runs
-  // regardless — hint is just a UX nicety, not the enforcement.
-  tc.requestAccessToken({ prompt: 'consent', hint: ALLOWED_DRIVE_EMAIL });
-}
-
-function tryAutoReconnectDrive(){
-  setTimeout(() => {
-    const tc = ensureTokenClient();
-    if(!tc) return;
-    tc.requestAccessToken({ prompt: '', hint: ALLOWED_DRIVE_EMAIL });
-  }, 400);
-}
-
-function disconnectDrive(){
-  driveAccessToken = null;
-  setDriveStatus('disconnected');
-  save();
-  closeModal();
-}
-
-function updateSyncUi(){
-  const dot = document.getElementById('cloudDot');
-  const label = document.getElementById('cloudLabel');
-  if(!dot || !label) return;
-  dot.className = 'drive-dot' + (firebaseConnected ? ' on' : ' err');
-  label.textContent = firebaseConnected ? 'Synced (live)' : 'Reconnecting…';
-}
-
-// Clicking the sync status is now purely informational — there is
-// nothing left to configure, since Firebase is baked into the file
-// itself and every device connects automatically. Kept as a modal
-// (rather than deleting the button) so root/staff have somewhere to
-// glance at actual connection state, and so a stale bookmark/habit of
-// clicking "Sync across devices" still does something sensible.
-function openSyncSettings(){
-  const layer = document.getElementById('modalLayer');
-  layer.innerHTML = `<div class="modal-bg" id="syncBg">
-    <div class="modal">
-      <h3>Sync across devices</h3>
-      <div class="hint">${firebaseConnected ? 'Connected — this board syncs instantly and automatically to every device via Firebase. Nothing to set up.' : 'Not currently connected — check your internet connection. Nothing to configure here; this reconnects automatically.'}</div>
-      <div class="modal-actions">
-        <button class="btn btn-primary" onclick="closeModal()">Close</button>
-      </div>
-    </div>
-  </div>`;
-}
-
-// Sets up the live Firebase listener for the shared board. Fires
-// immediately with whatever data currently exists (even if that's
-// nothing yet, on a brand-new board), and again instantly every time
-// ANY device writes — this fully replaces jsonbin's pullFromCloud +
-// 2-minute polling with genuine real-time sync, and there is no
-// per-record size limit here to force chunking the way jsonbin's
-// 100KB free-tier cap did.
+// ===================== FIREBASE BOARD SYNC =====================
+// RESTORED (2026-09-22) — this got accidentally deleted along with the
+// Google Drive code in the same edit that removed Drive (they used to
+// sit right next to each other in the file). Unchanged from the
+// original 2026-09-09 Firebase migration otherwise: see dev notes
+// BOARD DATA SYNC section for the full history.
 function initFirebaseBoardSync(){
   return new Promise((resolve) => {
     firebase.database().ref('.info/connected').on('value', (snap) => {
@@ -3127,11 +3093,10 @@ function initFirebaseBoardSync(){
       if(remote){
         state.items = remote.items || [];
         state.notes = remote.notes || [];
-        nextNo = remote.nextNo || nextNo;
+        nextNo = remote.nextNo || (state.notes.length + 1);
         itemTypes = (remote.itemTypes && remote.itemTypes.length) ? remote.itemTypes : itemTypes;
         users = Array.isArray(remote.users) ? remote.users : users;
         drivers = Array.isArray(remote.drivers) ? remote.drivers : drivers;
-        if(remote.drive) drive.clientId = remote.drive.clientId || drive.clientId;
         renderTypeSelects();
         renderDriverOptions();
         render();
@@ -3161,8 +3126,7 @@ function pushBoardToFirebase(){
     nextNo,
     itemTypes,
     users,
-    drivers,
-    drive: { clientId: drive.clientId }
+    drivers
   }).then(() => {
     firebaseConnected = true;
     updateSyncUi();
@@ -3182,147 +3146,86 @@ function queuePushToFirebase(){
   firebasePushTimer = setTimeout(pushBoardToFirebase, 800);
 }
 
-async function driveApiFetch(url, options){
-  options = options || {};
-  const headers = Object.assign({ Authorization: 'Bearer ' + driveAccessToken }, options.headers || {});
-  const res = await fetch(url, Object.assign({}, options, { headers }));
-  if(res.status === 401){
-    driveAccessToken = null;
-    setDriveStatus('error');
-    throw new Error('Drive session expired — reconnect');
-  }
-  if(!res.ok){
-    const text = await res.text().catch(() => '');
-    throw new Error('Drive API ' + res.status + ' ' + text);
-  }
-  return res;
+function updateSyncUi(){
+  const dot = document.getElementById('cloudDot');
+  const label = document.getElementById('cloudLabel');
+  if(!dot || !label) return;
+  dot.className = 'drive-dot' + (firebaseConnected ? ' on' : ' err');
+  label.textContent = firebaseConnected ? 'Synced (live)' : 'Reconnecting…';
 }
 
-const DISPATCH_RECORDS_FOLDER = 'Oak Joinery Dispatch Notes';
-let dispatchFolderIdCache = null;
-
-async function findOrCreateDriveFolder(name){
-  const q = encodeURIComponent(`name='${name.replace(/'/g,"\\'")}' and mimeType='application/vnd.google-apps.folder' and trashed=false`);
-  const res = await driveApiFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)&spaces=drive`);
-  const data = await res.json();
-  if(data.files && data.files[0]) return data.files[0].id;
-  const res2 = await driveApiFetch('https://www.googleapis.com/drive/v3/files?fields=id', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, mimeType: 'application/vnd.google-apps.folder' })
-  });
-  const created = await res2.json();
-  return created.id;
+// Purely informational now — Firebase is baked into the file itself, so
+// there's nothing left to configure here (no API key/Bin ID, unlike the
+// old jsonbin days). Not gated by manageSync since there's no setting
+// to protect.
+function openSyncSettings(){
+  const layer = document.getElementById('modalLayer');
+  layer.innerHTML = `<div class="modal-bg" id="syncBg">
+    <div class="modal">
+      <h3>Sync across devices</h3>
+      <div class="hint">${firebaseConnected ? 'Connected — every device sharing this link sees the same board live, instantly.' : 'Reconnecting — check your internet connection.'}</div>
+      <div class="modal-actions"><button class="btn" onclick="closeModal()">Close</button></div>
+    </div>
+  </div>`;
 }
 
-async function createDriveBinaryFile(name, blob, mimeType, folderId){
-  const boundary = 'oakjoinery-boundary-rec';
-  const metadata = { name, mimeType, parents: [folderId] };
-  const metaPart = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n`;
-  const closePart = `\r\n--${boundary}--`;
-  const body = new Blob([metaPart, blob, closePart]);
-  const res = await driveApiFetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', {
-    method: 'POST',
-    headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
-    body
-  });
-  return res.json();
-}
 
-async function updateDriveBinaryFile(fileId, blob, mimeType){
-  await driveApiFetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': mimeType },
-    body: blob
-  });
-}
-
-async function generateDocketPdfBlob(){
+// REPLACED Google Drive entirely (2026-09-22), per user request — Drive's
+// client-side OAuth has no way to reconnect indefinitely without asking
+// again eventually (see the removed tryAutoReconnectDrive's own comment
+// for the full explanation: no refresh tokens without a real backend
+// server, and browsers increasingly block even the silent reconnect
+// check). Firebase Storage uses the exact same open, no-login connection
+// this app already has to the Realtime Database — no per-person sign-in
+// at all, so there is nothing left to "reconnect." A locked note's PDF
+// just uploads in the background the moment it's completed.
+//
+// ONE-TIME SETUP THIS NEEDS IN THE FIREBASE CONSOLE (can't be done from
+// here): open the project -> Storage -> get started (Spark/free plan is
+// fine) -> Rules tab -> set to `allow read, write: if true;` the same
+// open-access trust model already accepted for the Realtime Database
+// rules. Until that's done, PDF uploads will fail silently (the note
+// still locks/signs fine either way — this is purely the archive copy).
+function generateDocketPdfBlob(){
   const printArea = document.getElementById('printArea');
   if(!printArea || !window.html2canvas || !window.jspdf) return null;
-  const canvas = await html2canvas(printArea, { backgroundColor: '#F3EEDF', scale: 2 });
-  const imgData = canvas.toDataURL('image/png');
-  const { jsPDF } = window.jspdf;
-  const pdf = new jsPDF({ unit: 'px', format: [canvas.width, canvas.height] });
-  pdf.addImage(imgData, 'PNG', 0, 0, canvas.width, canvas.height);
-  return pdf.output('blob');
+  return html2canvas(printArea, { backgroundColor: '#F3EEDF', scale: 2 }).then((canvas) => {
+    const imgData = canvas.toDataURL('image/png');
+    const { jsPDF } = window.jspdf;
+    const pdf = new jsPDF({ unit: 'px', format: [canvas.width, canvas.height] });
+    pdf.addImage(imgData, 'PNG', 0, 0, canvas.width, canvas.height);
+    return pdf.output('blob');
+  });
 }
 
-async function saveDispatchRecordToDrive(note){
-  if(!driveAccessToken) return { ok: false, reason: 'not-connected' };
+async function savePdfToFirebase(note){
   try{
     const pdfBlob = await generateDocketPdfBlob();
     if(!pdfBlob) return { ok: false, reason: 'render-failed' };
-    if(note.driveFileId){
-      await updateDriveBinaryFile(note.driveFileId, pdfBlob, 'application/pdf');
-    } else {
-      if(!dispatchFolderIdCache) dispatchFolderIdCache = await findOrCreateDriveFolder(DISPATCH_RECORDS_FOLDER);
-      const fileName = `${note.number} - ${note.customer}.pdf`;
-      const created = await createDriveBinaryFile(fileName, pdfBlob, 'application/pdf', dispatchFolderIdCache);
-      note.driveFileId = created.id;
-    }
+    const fileName = `${note.number} - ${note.customer}.pdf`;
+    const ref = firebase.storage().ref('deliveryNotes/' + fileName);
+    await ref.put(pdfBlob, { contentType: 'application/pdf' });
+    note.pdfUrl = await ref.getDownloadURL();
     await persistLocal();
     return { ok: true };
   }catch(e){
-    console.error('dispatch record upload failed', e);
+    console.error('PDF archive upload failed', e);
     return { ok: false, reason: 'error' };
   }
 }
 
-async function manualSaveRecord(noteId){
+async function manualSavePdf(noteId){
   const note = state.notes.find(n => n.id === noteId);
   if(!note) return;
-  if(!driveAccessToken){
-    alert('Connect Google Drive first (top toolbar) to save a copy of this note.');
-    return;
-  }
-  const result = await saveDispatchRecordToDrive(note);
+  const result = await savePdfToFirebase(note);
   if(result.ok){
     render();
     viewNote(noteId);
   } else {
-    alert('Could not save a copy to Drive — try again in a moment.');
+    alert('Could not save a PDF copy — check your connection and try again. If this keeps happening, Firebase Storage may not be enabled yet for this project (see dev notes).');
   }
 }
 
-// Drive is restricted to one specific Google account, per user request
-// (2026-09-16: "change it that it usis only sean@oakjionery.co.za for
-// google drive"). The account picker (prompt: 'select_account consent'
-// in connectDrive) lets someone CHOOSE the wrong account, so this is
-// the actual enforcement: after any sign-in — manual connect OR silent
-// auto-reconnect on load, both funnel through this same callback —
-// verify the token's account via Google's userinfo endpoint and
-// disconnect immediately if it doesn't match. Client-side only, same
-// "deterrent not a real security boundary" caveat as the users[]
-// login system elsewhere in this file.
-const ALLOWED_DRIVE_EMAIL = 'sean@oakjoinery.co.za';
-
-async function onDriveSignedIn(){
-  try{
-    const res = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
-      headers: { Authorization: 'Bearer ' + driveAccessToken }
-    });
-    const info = await res.json();
-    const email = (info.email || '').toLowerCase();
-    if(email !== ALLOWED_DRIVE_EMAIL.toLowerCase()){
-      driveAccessToken = null;
-      setDriveStatus('disconnected');
-      alert(`Google Drive here is restricted to ${ALLOWED_DRIVE_EMAIL}. You signed in as ${info.email || 'a different account'} — please reconnect using the correct account.`);
-      return;
-    }
-  }catch(e){
-    // Couldn't verify the account for some reason — fail safe rather
-    // than silently trusting an unverified sign-in.
-    driveAccessToken = null;
-    setDriveStatus('error');
-    alert("Couldn't verify the signed-in Google account — please try connecting again.");
-    return;
-  }
-  // Drive is now only used for archiving PDFs of locked delivery notes —
-  // board data (items/notes/itemTypes) syncs via jsonbin, not Drive.
-  // Signing in just confirms we have a usable access token.
-  setDriveStatus('connected');
-}
 
 // ===================== USERS, LOGIN & PERMISSIONS =====================
 // Client-side only — a deterrent for normal staff use, not a real
@@ -3577,7 +3480,6 @@ function applyPermissionsToUi(){
   // visible to everyone rather than gated by manageSync like it used
   // to be when it opened a real API-key/Bin-ID configuration panel.
   set('syncBtn', true);
-  set('driveBtn', can('manageSync'));
   set('manageUsersBtn', can('manageUsers'));
   render();
 }
@@ -3586,13 +3488,30 @@ const PERMISSION_LABELS = [
   ['addItems', 'Add items'],
   ['removeItems', 'Remove items'],
   ['moveItems', 'Move items (mark finished / add to delivery note)'],
+  ['returnToStock', 'Return items to stock (undo a mistaken send from Stock List, Board Stock or Consumables)'],
   ['manageNotes', 'Manage delivery notes (view, sign)'],
   ['manageTypes', 'Manage item catalog'],
   ['exportData', 'Download sheet / combine duplicates'],
-  ['manageSync', 'Manage Google Drive settings'],
+  ['manageSync', "No longer used — kept only so existing permission grants aren't affected"],
   ['manageUsers', 'Manage users'],
   ['markBuilt', 'Mark stock items as built (Stock List app)'],
-  ['renameCategories', 'Rename stock categories (Stock List app)']
+  ['renameCategories', 'Rename stock categories (Stock List app)'],
+  ['stockAddQty', 'Add stock — the + button (Stock List app)'],
+  ['stockRemoveQty', 'Minimize stock — the − button (Stock List app)'],
+  ['stockEditItems', 'Edit item details (Stock List app)'],
+  ['copyJobs', 'Copy a job with its recipe (Stock List app)'],
+  ['boardAddBoard', 'Add Boards (Board Stock app)'],
+  ['boardAddQty', 'Add Stock (Board Stock app)'],
+  ['boardRemoveQty', 'Remove Stock (Board Stock app)'],
+  ['boardSendToDispatch', 'Send to Dispatch (Board Stock app)'],
+  ['boardViewLog', 'Activity Log (Board Stock app)'],
+  ['boardSettings', 'App Settings (Board Stock app)'],
+  ['consManageItems', 'Add/edit items & reorder levels (Consumables app)'],
+  ['consHandOut', 'Hand out items (Consumables app)'],
+  ['consManageConsumables', 'Update container fill levels / liquid volumes (Consumables app)'],
+  ['consViewReports', 'View reports (Consumables app)'],
+  ['consExportExcel', 'Export to Excel (Consumables app)'],
+  ['consSendToDispatch', 'Send to Dispatch (Consumables app)']
 ];
 
 function openManageUsers(editId){
@@ -3752,7 +3671,7 @@ document.getElementById('manageUsersBtn').addEventListener('click', () => openMa
 
 async function persistLocal(){
   try{
-    await storage.set('board', JSON.stringify({items: state.items, notes: state.notes, nextNo, itemTypes, users, drivers, drive: {clientId: drive.clientId}}), false);
+    await storage.set('board', JSON.stringify({items: state.items, notes: state.notes, nextNo, itemTypes, users, drivers}), false);
   }catch(e){ console.error('storage failed', e); }
 }
 
