@@ -2232,57 +2232,78 @@ async function returnItemToStock(id){
       const entries = it.recipeSnapshot.filter(d => (d.sourceApp || 'stockList') === sourceApp);
 
       if(sourceApp === 'stockList'){
-        const snap = await firebase.database().ref('stockList/items').once('value');
-        const stockItems = Array.isArray(snap.val()) ? snap.val() : [];
-        entries.forEach(d => {
-          const si = stockItems.find(s => s.id === d.itemId);
-          if(!si){
-            if(d.deductQty || d.deductQtyL) missing.push(d.desc || d.itemId);
-            return;
-          }
-          si.qty = (Number(si.qty) || 0) + (d.deductQty || 0);
-          if(d.deductQtyL) si.qtyL = (Number(si.qtyL) || 0) + d.deductQtyL;
+        // Transaction (not read-then-overwrite) so a Stock List change saved
+        // at the same moment can't be lost. The function may run more than
+        // once, so "missing" is rebuilt on every run.
+        let missHere = [];
+        await firebase.database().ref('stockList/items').transaction(current => {
+          missHere = [];
+          if(!current) return current;
+          const stockItems = syncList(current);
+          entries.forEach(d => {
+            const si = stockItems.find(s => s.id === d.itemId);
+            if(!si){
+              if(d.deductQty || d.deductQtyL) missHere.push(d.desc || d.itemId);
+              return;
+            }
+            si.qty = (Number(si.qty) || 0) + (d.deductQty || 0);
+            if(d.deductQtyL) si.qtyL = (Number(si.qtyL) || 0) + d.deductQtyL;
+          });
+          return stockItems;
         });
-        await firebase.database().ref('stockList/items').set(stockItems);
+        missing.push(...missHere);
 
       } else if(sourceApp === 'boardStock'){
-        const snap = await firebase.database().ref('boardStock/boards').once('value');
-        const boards = Array.isArray(snap.val()) ? snap.val() : [];
-        entries.forEach(d => {
-          const b = boards.find(x => x.code === d.itemId);
-          if(!b){ missing.push(d.desc || d.itemId); return; }
-          if(typeof b.qty !== 'object') b.qty = {};
-          const loc = d.location || Object.keys(b.qty)[0] || 'Main';
-          b.qty[loc] = (Number(b.qty[loc]) || 0) + (d.deductQty || 0);
+        let missHere = [];
+        await firebase.database().ref('boardStock/boards').transaction(current => {
+          missHere = [];
+          if(!current) return current;
+          const boards = syncList(current);
+          entries.forEach(d => {
+            const b = boards.find(x => x.code === d.itemId);
+            if(!b){ missHere.push(d.desc || d.itemId); return; }
+            if(typeof b.qty !== 'object' || b.qty === null) b.qty = {};
+            const loc = d.location || Object.keys(b.qty)[0] || 'Main';
+            b.qty[loc] = (Number(b.qty[loc]) || 0) + (d.deductQty || 0);
+          });
+          return boards;
         });
-        await firebase.database().ref('boardStock/boards').set(boards);
+        missing.push(...missHere);
 
       } else if(sourceApp === 'consumablesStock'){
         const screwEntries = entries.filter(d => d.kind === 'screw');
         const liquidEntries = entries.filter(d => d.kind === 'liquid');
         if(screwEntries.length){
-          const snap = await firebase.database().ref('consumablesStock/screwItems').once('value');
-          const screws = snap.val() || {};
-          screwEntries.forEach(d => {
-            const s = screws[d.itemId];
-            if(!s){ missing.push(d.desc || d.itemId); return; }
-            if(!s.qtyByLocation) s.qtyByLocation = {};
-            const loc = d.location || Object.keys(s.qtyByLocation)[0] || 'Main';
-            s.qtyByLocation[loc] = (Number(s.qtyByLocation[loc]) || 0) + (d.deductQty || 0);
+          let missHere = [];
+          await firebase.database().ref('consumablesStock/screwItems').transaction(current => {
+            missHere = [];
+            if(!current) return current;
+            screwEntries.forEach(d => {
+              const s = current[d.itemId];
+              if(!s){ missHere.push(d.desc || d.itemId); return; }
+              if(!s.qtyByLocation) s.qtyByLocation = {};
+              const loc = d.location || Object.keys(s.qtyByLocation)[0] || 'Main';
+              s.qtyByLocation[loc] = (Number(s.qtyByLocation[loc]) || 0) + (d.deductQty || 0);
+            });
+            return current;
           });
-          await firebase.database().ref('consumablesStock/screwItems').set(screws);
+          missing.push(...missHere);
         }
         if(liquidEntries.length){
-          const snap = await firebase.database().ref('consumablesStock/consumableTypes').once('value');
-          const types = snap.val() || {};
-          liquidEntries.forEach(d => {
-            const t = types[d.itemId];
-            if(!t){ missing.push(d.desc || d.itemId); return; }
-            if(!t.volumeByLocation) t.volumeByLocation = {};
-            const loc = d.location || Object.keys(t.volumeByLocation)[0] || 'Main';
-            t.volumeByLocation[loc] = (Number(t.volumeByLocation[loc]) || 0) + (d.deductQty || 0);
+          let missHere = [];
+          await firebase.database().ref('consumablesStock/consumableTypes').transaction(current => {
+            missHere = [];
+            if(!current) return current;
+            liquidEntries.forEach(d => {
+              const t = current[d.itemId];
+              if(!t){ missHere.push(d.desc || d.itemId); return; }
+              if(!t.volumeByLocation) t.volumeByLocation = {};
+              const loc = d.location || Object.keys(t.volumeByLocation)[0] || 'Main';
+              t.volumeByLocation[loc] = (Number(t.volumeByLocation[loc]) || 0) + (d.deductQty || 0);
+            });
+            return current;
           });
-          await firebase.database().ref('consumablesStock/consumableTypes').set(types);
+          missing.push(...missHere);
         }
       }
     }
@@ -2789,8 +2810,8 @@ function saveSigningDetails(noteId){
   note.siteSignedDate = document.getElementById('sdSiteDate').value.trim();
   save();
   render();
+  viewNote(noteId); // show the note first, so the PDF is made from THIS note's docket
   if(isNoteComplete(note)) savePdfToFirebase(note);
-  viewNote(noteId);
 }
 
 function removeNoteItem(noteId, stockItemId){
@@ -2953,8 +2974,8 @@ function saveEditedNote(noteId){
 
   save();
   render();
+  viewNote(noteId); // show the note first, so the PDF is made from THIS note's docket
   if(isNoteComplete(note)) savePdfToFirebase(note);
-  viewNote(noteId);
 }
 
 async function generateDocketImage(note){
@@ -3080,6 +3101,75 @@ document.getElementById('syncBtn').addEventListener('click', openSyncSettings);
 // sit right next to each other in the file). Unchanged from the
 // original 2026-09-09 Firebase migration otherwise: see dev notes
 // BOARD DATA SYNC section for the full history.
+// ===================== SAFE MERGE SYNC =====================
+// Before: every save did firebaseBoardRef.set({...whole board...}) from
+// this device's copy, so anything another device or app wrote in the
+// meantime (e.g. an item just sent from Stock List / Board Stock /
+// Consumables, or a user edited in another app) was silently wiped.
+// Now each save works out only what THIS device changed since it last
+// heard from the server (added / edited / deleted, matched by id) and
+// applies just those changes on top of the server's current data, in a
+// transaction so two simultaneous saves can't overwrite each other.
+let firebaseBase = null;          // last copy of dispatchBoard this device got from the server
+let firebaseDirty = false;        // a local change is waiting for the debounce timer
+let firebaseInFlight = false;     // a save is currently being sent
+function firebasePushPendingNow(){ return firebaseDirty || firebaseInFlight; }
+
+function syncClone(x){ return x === undefined ? null : JSON.parse(JSON.stringify(x)); }
+function syncList(v){
+  if(Array.isArray(v)) return v.filter(x => x !== null && x !== undefined);
+  if(v && typeof v === 'object') return Object.values(v);
+  return [];
+}
+function mergeSyncList(baseIn, localIn, remoteIn){
+  const base = syncList(baseIn), local = syncList(localIn), remote = syncList(remoteIn);
+  const all = base.concat(local, remote);
+  const byId = all.every(x => x && typeof x === 'object' && x.id !== undefined && x.id !== null);
+  if(!byId){
+    // Plain lists (driver names, item types): set-style merge.
+    const k = x => JSON.stringify(x);
+    const baseKeys = new Set(base.map(k)), localKeys = new Set(local.map(k));
+    const removedHere = new Set(base.filter(x => !localKeys.has(k(x))).map(k));
+    const out = remote.filter(x => !removedHere.has(k(x)));
+    const outKeys = new Set(out.map(k));
+    local.forEach(x => { if(!baseKeys.has(k(x)) && !outKeys.has(k(x))){ out.push(x); outKeys.add(k(x)); } });
+    return out;
+  }
+  const baseMap = new Map(base.map(x => [x.id, x]));
+  const localMap = new Map(local.map(x => [x.id, x]));
+  const changedHere = id => {
+    const l = localMap.get(id), b = baseMap.get(id);
+    return !!l && (!b || JSON.stringify(l) !== JSON.stringify(b));
+  };
+  const out = [];
+  const seen = new Set();
+  remote.forEach(r => {
+    seen.add(r.id);
+    if(baseMap.has(r.id) && !localMap.has(r.id)) return;        // deleted on this device
+    out.push(changedHere(r.id) ? localMap.get(r.id) : r);         // edited here wins, otherwise server copy
+  });
+  local.forEach(l => {
+    if(seen.has(l.id)) return;
+    if(!baseMap.has(l.id)) { out.push(l); return; }               // added on this device
+    if(changedHere(l.id)) out.push(l);                            // edited here but deleted elsewhere: keep the edit
+  });
+  return out;
+}
+function mergeBoardData(base, local, remote){
+  base = base || {}; remote = remote || {};
+  return {
+    items: mergeSyncList(base.items, local.items, remote.items),
+    notes: mergeSyncList(base.notes, local.notes, remote.notes),
+    users: mergeSyncList(base.users, local.users, remote.users),
+    drivers: mergeSyncList(base.drivers, local.drivers, remote.drivers),
+    itemTypes: mergeSyncList(base.itemTypes, local.itemTypes, remote.itemTypes),
+    nextNo: Math.max(Number(remote.nextNo) || 0, Number(local.nextNo) || 0) || 1
+  };
+}
+function localBoardData(){
+  return { items: state.items, notes: state.notes, nextNo, itemTypes, users, drivers };
+}
+
 function initFirebaseBoardSync(){
   return new Promise((resolve) => {
     firebase.database().ref('.info/connected').on('value', (snap) => {
@@ -3091,12 +3181,19 @@ function initFirebaseBoardSync(){
     firebaseBoardRef.on('value', (snapshot) => {
       const remote = snapshot.val();
       if(remote){
-        state.items = remote.items || [];
-        state.notes = remote.notes || [];
-        nextNo = remote.nextNo || (state.notes.length + 1);
-        itemTypes = (remote.itemTypes && remote.itemTypes.length) ? remote.itemTypes : itemTypes;
-        users = Array.isArray(remote.users) ? remote.users : users;
-        drivers = Array.isArray(remote.drivers) ? remote.drivers : drivers;
+        // If this device has a change still waiting to be saved, keep it
+        // (re-applied on top of the server's newer data) instead of
+        // throwing it away.
+        const applied = (firebasePushPendingNow() && firebaseBase)
+          ? mergeBoardData(firebaseBase, localBoardData(), remote)
+          : remote;
+        firebaseBase = syncClone(remote);
+        state.items = syncList(applied.items);
+        state.notes = syncList(applied.notes);
+        nextNo = applied.nextNo || (state.notes.length + 1);
+        itemTypes = (applied.itemTypes && syncList(applied.itemTypes).length) ? syncList(applied.itemTypes) : itemTypes;
+        users = applied.users ? syncList(applied.users) : users;
+        drivers = applied.drivers ? syncList(applied.drivers) : drivers;
         renderTypeSelects();
         renderDriverOptions();
         render();
@@ -3120,17 +3217,22 @@ function initFirebaseBoardSync(){
 
 function pushBoardToFirebase(){
   if(!firebaseBoardRef) return;
-  firebaseBoardRef.set({
-    items: state.items,
-    notes: state.notes,
-    nextNo,
-    itemTypes,
-    users,
-    drivers
-  }).then(() => {
+  const local = syncClone(localBoardData());
+  const base = firebaseBase;
+  firebaseDirty = false;
+  firebaseInFlight = true;
+  firebaseBoardRef.transaction(current => {
+    if(!current) return local;                  // nothing on the server yet
+    return mergeBoardData(base, local, current); // only this device's changes, on top of the latest data
+  }).then(res => {
+    firebaseInFlight = false;
+    if(res && res.committed && res.snapshot) firebaseBase = syncClone(res.snapshot.val());
     firebaseConnected = true;
     updateSyncUi();
-  }).catch(() => {
+  }).catch(err => {
+    firebaseInFlight = false;
+    firebaseDirty = true;                       // keep the change; it'll be retried on the next save
+    console.error('Dispatch save failed', err);
     firebaseConnected = false;
     updateSyncUi();
   });
@@ -3142,6 +3244,7 @@ function pushBoardToFirebase(){
 // rate-limit concerns that required — Firebase's free tier is nowhere
 // near a constraint at this app's scale.
 function queuePushToFirebase(){
+  firebaseDirty = true;
   clearTimeout(firebasePushTimer);
   firebasePushTimer = setTimeout(pushBoardToFirebase, 800);
 }
@@ -3206,7 +3309,7 @@ async function savePdfToFirebase(note){
     const ref = firebase.storage().ref('deliveryNotes/' + fileName);
     await ref.put(pdfBlob, { contentType: 'application/pdf' });
     note.pdfUrl = await ref.getDownloadURL();
-    await persistLocal();
+    await save(); // was persistLocal() — the PDF link never reached other devices
     return { ok: true };
   }catch(e){
     console.error('PDF archive upload failed', e);
@@ -3504,6 +3607,7 @@ const PERMISSION_LABELS = [
   ['boardAddQty', 'Add Stock (Board Stock app)'],
   ['boardRemoveQty', 'Remove Stock (Board Stock app)'],
   ['boardSendToDispatch', 'Send to Dispatch (Board Stock app)'],
+  ['boardExportData', 'Print / share stock PDF (Board Stock app)'],
   ['boardViewLog', 'Activity Log (Board Stock app)'],
   ['boardSettings', 'App Settings (Board Stock app)'],
   ['consManageItems', 'Add/edit items & reorder levels (Consumables app)'],
