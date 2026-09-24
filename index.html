@@ -1429,7 +1429,8 @@ function defaultPermissions(){
   return {
     addItems: false,      // Add forms (Unfinished/Finished/Dispatched) + one-off items
     removeItems: false,   // × delete button on cards
-    moveItems: false,     // Mark finished, Add to delivery note (stage into cart)
+    markFinished: false,  // "Mark finished" — Unfinished → Finished (split out of moveItems 2026-09-24)
+    moveItems: false,     // Mark ready, Add to delivery note (stage into cart)
     returnToStock: false, // "Return to stock" — undoes a mistaken send from
                            // the Stock List app, crediting its components
                            // back over there and removing the item here.
@@ -1504,6 +1505,11 @@ function can(key){
   const u = getCurrentUser();
   if(!u) return false;
   if(u.isRoot) return true;
+  // markFinished (2026-09-24) was split out of moveItems so "Unfinished →
+  // Finished" can be given on its own. Anyone who had moveItems before
+  // this existed keeps being able to mark finished until someone
+  // explicitly ticks/unticks the new box for them.
+  if(key === 'markFinished' && u.permissions && u.permissions.markFinished === undefined) return !!u.permissions.moveItems;
   return !!(u.permissions && u.permissions[key]);
 }
 
@@ -1912,7 +1918,7 @@ function cardHtml(it, status){
   let actions = '';
   let dates = `<span>Added ${it.addedDate}</span>`;
   if(status === 'unvinaged'){
-    actions = can('moveItems') ? `<button class="btn btn-green btn-sm" onclick="markVinaged('${it.id}')">Mark finished</button>` : '';
+    actions = can('markFinished') ? `<button class="btn btn-green btn-sm" onclick="markVinaged('${it.id}')">Mark finished</button>` : '';
     // Per user request: mirrors the Stock List app's own "Return to
     // stock" (which undoes a mistaken send FROM that app) — this is
     // the same action available directly from HERE, so staff working
@@ -2193,7 +2199,7 @@ function removeFromCart(tempId){
 }
 
 function markVinaged(id){
-  if(!can('moveItems')) return;
+  if(!can('markFinished')) return;
   const it = state.items.find(x => x.id === id);
   if(!it) return;
 
@@ -3782,7 +3788,8 @@ function applyPermissionsToUi(){
 const PERMISSION_LABELS = [
   ['addItems', 'Add items'],
   ['removeItems', 'Remove items'],
-  ['moveItems', 'Move items (mark finished / add to delivery note)'],
+  ['markFinished', 'Mark finished (move Unfinished → Finished)'],
+  ['moveItems', 'Move items (mark ready / add to delivery note)'],
   ['returnToStock', 'Return items to stock (undo a mistaken send from Stock List, Board Stock or Consumables)'],
   ['manageNotes', 'Manage delivery notes (view, sign)'],
   ['manageTypes', 'Manage item catalog'],
@@ -3814,7 +3821,9 @@ function openManageUsers(editId){
   if(!can('manageUsers')) return;
   const layer = document.getElementById('modalLayer');
   const editing = editId ? users.find(u => u.id === editId) : null;
-  const perms = editing ? editing.permissions : defaultPermissions();
+  const perms = editing ? { ...(editing.permissions || {}) } : defaultPermissions();
+  // Show the new "Mark finished" box ticked for anyone who could already do it via moveItems.
+  if(perms.markFinished === undefined) perms.markFinished = !!perms.moveItems;
   const apps = editing ? (editing.apps || defaultApps()) : defaultApps();
   // Only the main root may change app access, or touch the main root
   // account at all — a secondary root can manage ordinary users but
