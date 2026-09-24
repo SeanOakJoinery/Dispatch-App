@@ -1310,6 +1310,10 @@ WHEN THE USER UPLOADS THIS FILE AGAIN
   <button class="btn btn-primary" id="addBtn">+ Add to unfinished</button>
 </div>
 
+<div class="board-search" style="margin:0 0 10px;display:flex;gap:8px;align-items:center;">
+  <input type="search" id="boardSearch" placeholder="🔍 Search items or jobs (e.g. NH Hotel, headboard)…" style="flex:1;max-width:520px;" oninput="boardSearchTerm = this.value; render();">
+  <span id="boardSearchInfo" style="font-size:12px;color:var(--muted);"></span>
+</div>
 <div class="board">
   <div class="col unvinaged">
     <div class="col-head"><h2>Unfinished</h2><span class="count" id="cnt-unvinaged">0</span></div>
@@ -1815,9 +1819,18 @@ function specHtml(type){
   return '<div class="spec">' + s.map(l => '<div><span class="tag">-</span><span>'+l+'</span></div>').join('') + '</div>';
 }
 
+// Board search (2026-09-24): filters every column by item name, job /
+// reference or quantity. Empty search shows everything as before.
+let boardSearchTerm = '';
+function itemMatchesSearch(it){
+  const q = (boardSearchTerm || '').trim().toLowerCase();
+  if(!q) return true;
+  return q.split(/\s+/).every(w => `${it.type || ''} ${it.ref || ''} x${it.qty || ''}`.toLowerCase().includes(w));
+}
 function render(){
   const cols = {unvinaged:[], vinaged:[], ready:[], dispatched:[]};
   let archivedCount = 0;
+  let hiddenBySearch = 0;
   state.items.forEach(it => {
     if(it.status === 'dispatched'){
       const note = state.notes.find(n => n.id === it.noteId);
@@ -1836,8 +1849,13 @@ function render(){
         return; // handed over — out of the active board, still viewable via "Delivery notes"
       }
     }
-    cols[it.status].push(it);
+    if(!itemMatchesSearch(it)){ hiddenBySearch++; return; }
+    if(cols[it.status]) cols[it.status].push(it);
   });
+  const searchInfo = document.getElementById('boardSearchInfo');
+  if(searchInfo) searchInfo.textContent = (boardSearchTerm || '').trim()
+    ? `${cols.unvinaged.length + cols.vinaged.length + cols.ready.length + cols.dispatched.length} match${hiddenBySearch ? `, ${hiddenBySearch} hidden` : ''}`
+    : '';
 
   document.getElementById('cnt-unvinaged').textContent = cols.unvinaged.length;
   document.getElementById('cnt-vinaged').textContent = cols.vinaged.length;
@@ -1942,6 +1960,7 @@ function cardHtml(it, status){
       </div>
       <div style="display:flex;align-items:center;gap:8px;">
         <span class="card-qty">x${it.qty}</span>
+        ${canEditItemHere(it, status) ? `<button class="del" title="Edit name / job / qty" onclick="openEditItem('${it.id}')" style="font-size:14px;">✎</button>` : ''}
         ${canRemoveHere ? `<button class="del" title="Remove" onclick="removeItem('${it.id}')">&times;</button>` : ''}
       </div>
     </div>
@@ -1949,6 +1968,75 @@ function cardHtml(it, status){
     <div class="card-dates">${dates}</div>
     <div class="card-actions">${actions}</div>
   </div>`;
+}
+
+
+// ---------- Edit an item on the board (2026-09-24) ----------
+// Per user request: rename items such as "Assembly #12 (Roberst Store
+// Room) copy" (copied jobs arrive from Stock List with "copy" on the end).
+// Name, job/reference and qty can be changed on any card that isn't yet
+// on a delivery note; optionally every card with the same name is renamed
+// in one go. Items already on a delivery note are left alone, because the
+// note is a signed record of what was handed over.
+function canEditItemHere(it, status){
+  if(!can('addItems')) return false;
+  if(status === 'dispatched' || it.noteId) return false;
+  return !dispatchCart.some(c => c.stockItemId === it.id);
+}
+function openEditItem(id){
+  const it = state.items.find(x => x.id === id);
+  if(!it || !canEditItemHere(it, it.status)) return;
+  const sameName = state.items.filter(x => x.id !== id && x.type === it.type && !x.noteId && x.status !== 'dispatched');
+  const suggestion = /\s+copy(\s+\d+)?$/i.test(it.type) ? it.type.replace(/\s+copy(\s+\d+)?$/i, '') : '';
+  const layer = document.getElementById('modalLayer');
+  layer.innerHTML = `<div class="modal-bg" id="editItemBg">
+    <div class="modal" style="max-width:440px;">
+      <h3>Edit item</h3>
+      <div class="field" style="margin-top:10px;">
+        <label>Name</label>
+        <input type="text" id="editItemType" value="${escHtml(it.type)}" list="itemTypesList" style="width:100%;">
+        ${suggestion ? `<button type="button" class="btn btn-sm" style="margin-top:6px;" onclick="document.getElementById('editItemType').value = ${escHtml(JSON.stringify(suggestion))}">Remove “copy” → ${escHtml(suggestion)}</button>` : ''}
+      </div>
+      <div class="field" style="margin-top:10px;">
+        <label>Reference / job</label>
+        <input type="text" id="editItemRef" value="${escHtml(it.ref || '')}" style="width:100%;">
+      </div>
+      <div class="field" style="margin-top:10px;">
+        <label>Qty</label>
+        <input type="number" id="editItemQty" value="${it.qty}" min="1" style="width:100px;">
+      </div>
+      ${sameName.length ? `<label style="display:flex;align-items:center;gap:8px;margin-top:12px;font-size:13px;">
+        <input type="checkbox" id="editItemAll" style="width:auto;"> Also rename the other ${sameName.length} card${sameName.length === 1 ? '' : 's'} called “${escHtml(it.type)}”
+      </label>` : ''}
+      <div id="editItemErr" style="color:var(--rust);font-size:12px;margin-top:8px;display:none;"></div>
+      <div class="modal-actions">
+        <button class="btn" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveEditItem('${it.id}')">Save</button>
+      </div>
+    </div>
+  </div>`;
+  setTimeout(() => { const f = document.getElementById('editItemType'); if(f){ f.focus(); f.select(); } });
+}
+function saveEditItem(id){
+  const it = state.items.find(x => x.id === id);
+  if(!it || !canEditItemHere(it, it.status)) return;
+  const newType = document.getElementById('editItemType').value.trim();
+  const newRef = document.getElementById('editItemRef').value.trim();
+  const newQty = parseInt(document.getElementById('editItemQty').value, 10);
+  const err = document.getElementById('editItemErr');
+  if(!newType){ err.textContent = 'Enter a name'; err.style.display = 'block'; return; }
+  if(!newQty || newQty < 1){ err.textContent = 'Qty must be 1 or more'; err.style.display = 'block'; return; }
+  const all = document.getElementById('editItemAll');
+  const oldType = it.type;
+  if(all && all.checked){
+    state.items.forEach(x => { if(x.id !== id && x.type === oldType && !x.noteId && x.status !== 'dispatched') x.type = newType; });
+  }
+  it.type = newType;
+  it.ref = newRef;
+  it.qty = newQty;
+  save();
+  closeModal();
+  render();
 }
 
 function findMergeTarget(status, type, ref){
@@ -2649,6 +2737,7 @@ function viewNote(noteId){
         </div>
         ${driverBlock}
         ${siteBlock}
+        ${proofOfDeliveryHtml(note)}
       </div>`;
 
   if(complete && !rootOverride){
@@ -2727,12 +2816,18 @@ function viewNote(noteId){
           <button type="button" class="btn btn-sm" onclick="clearSignature('siteSigCanvas')">Clear</button>
         </div>
       </div>
+      <div class="field" style="margin-top:12px;">
+        <label>Delivery photo (optional)</label>
+        <input type="file" id="siteDeliveryPhoto" accept="image/*" capture="environment" onchange="previewDeliveryPhoto(this)">
+        <img id="siteDeliveryPhotoPreview" alt="" style="display:none;max-width:100%;max-height:180px;margin-top:6px;border-radius:6px;">
+        <div class="sig-hint" style="margin-top:4px;">Take a photo of the goods as delivered. The time and GPS location are recorded automatically when the client signs.</div>
+      </div>
       <div id="siteSigErr" style="color:var(--rust);font-size:12px;margin-top:8px;display:none;">Site signature required to lock this note</div>
       <div class="modal-actions">
         <button class="btn" onclick="closeModal()">Close for now</button>
         <button class="btn" onclick="openEditNote('${note.id}')">Edit customer / signature</button>
         <button class="btn" onclick="openSigningDetails('${note.id}')">Edit signing details</button>
-        <button class="btn btn-primary" onclick="confirmSiteSignature('${note.id}')">${rootOverride ? 'Update site signature' : 'Submit site signature &amp; lock'}</button>
+        <button class="btn btn-primary" id="siteSubmitBtn" onclick="confirmSiteSignature('${note.id}')">${rootOverride ? 'Update site signature' : 'Submit site signature &amp; lock'}</button>
         ${rootOverride ? `
         <button class="btn" onclick="window.print()">Print</button>
         <button class="btn" onclick="shareEmail('${note.id}')">Email</button>
@@ -2882,7 +2977,80 @@ function addAdhocItemToNote(noteId){
   viewNote(noteId);
 }
 
-function confirmSiteSignature(noteId){
+// ---------- Proof of delivery (2026-09-24) ----------
+// Photo of the delivered goods + exact time + GPS position, captured when
+// the client signs. The photo goes to Firebase Storage (deliveryPhotos/),
+// only its link is stored on the note. A just-taken photo is also kept in
+// memory so the PDF made straight after signing includes it.
+const deliveryPhotoLocal = {};
+function previewDeliveryPhoto(input){
+  const img = document.getElementById('siteDeliveryPhotoPreview');
+  if(!img) return;
+  const f = input.files && input.files[0];
+  if(!f){ img.style.display = 'none'; return; }
+  img.src = URL.createObjectURL(f);
+  img.style.display = 'block';
+}
+function getSigningLocation(timeoutMs){
+  return new Promise(resolve => {
+    if(!navigator.geolocation) return resolve(null);
+    let done = false;
+    const finish = v => { if(!done){ done = true; resolve(v); } };
+    setTimeout(() => finish(null), timeoutMs || 8000);
+    navigator.geolocation.getCurrentPosition(
+      pos => finish({ lat: +pos.coords.latitude.toFixed(6), lng: +pos.coords.longitude.toFixed(6), acc: Math.round(pos.coords.accuracy || 0) }),
+      () => finish(null),
+      { enableHighAccuracy: true, timeout: timeoutMs || 8000, maximumAge: 60000 }
+    );
+  });
+}
+function compressPhoto(file, maxSide){
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, (maxSide || 1280) / Math.max(img.width, img.height));
+      const c = document.createElement('canvas');
+      c.width = Math.round(img.width * scale); c.height = Math.round(img.height * scale);
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      c.toBlob(b => resolve({ blob: b, dataUrl: c.toDataURL('image/jpeg', 0.8) }), 'image/jpeg', 0.8);
+    };
+    img.onerror = () => resolve(null);
+    img.src = URL.createObjectURL(file);
+  });
+}
+async function uploadDeliveryPhoto(note, file){
+  const small = await compressPhoto(file, 1280);
+  if(!small || !small.blob) return false;
+  deliveryPhotoLocal[note.id] = small.dataUrl;
+  try{
+    const ref = firebase.storage().ref(`deliveryPhotos/${note.number} - ${note.id}.jpg`);
+    await ref.put(small.blob, { contentType: 'image/jpeg' });
+    note.deliveryPhotoUrl = await ref.getDownloadURL();
+    return true;
+  }catch(e){
+    console.error('Delivery photo upload failed', e);
+    alert('The delivery photo could not be uploaded (check the connection). The note is still signed; you can add the photo again with "Edit customer / signature" later if needed.');
+    return false;
+  }
+}
+function proofOfDeliveryHtml(note){
+  const bits = [];
+  if(note.siteSignedAt){
+    const d = new Date(note.siteSignedAt);
+    bits.push(`Signed ${d.toLocaleDateString('en-GB', {day:'2-digit', month:'short', year:'numeric'})} at ${d.toLocaleTimeString('en-GB', {hour:'2-digit', minute:'2-digit'})}`);
+  }
+  if(note.siteSignedGeo){
+    const g = note.siteSignedGeo;
+    bits.push(`GPS <a href="https://maps.google.com/?q=${g.lat},${g.lng}" target="_blank" rel="noopener">${g.lat}, ${g.lng}</a>${g.acc ? ` (±${g.acc} m)` : ''}`);
+  } else if(note.siteSignedAt){
+    bits.push('GPS not available');
+  }
+  const photo = deliveryPhotoLocal[note.id] || note.deliveryPhotoUrl;
+  return (bits.length ? `<div class="docket-pod" style="font-size:11px;margin-top:6px;opacity:.85;">${bits.join(' · ')}</div>` : '')
+    + (photo ? `<div class="docket-photo" style="margin-top:8px;"><img src="${photo}" crossorigin="anonymous" alt="Delivery photo" style="max-width:100%;max-height:260px;border-radius:6px;"><div class="sig-label">Delivery photo</div></div>` : '');
+}
+
+async function confirmSiteSignature(noteId){
   const note = state.notes.find(n => n.id === noteId);
   if(!note) return;
   const siteSig = getSignatureDataUrl('siteSigCanvas');
@@ -2891,10 +3059,18 @@ function confirmSiteSignature(noteId){
     err.style.display = 'block';
     return;
   }
+  const btn = document.getElementById('siteSubmitBtn');
+  if(btn){ btn.disabled = true; btn.textContent = 'Saving…'; }
   const nameInput = document.getElementById('siteSignerName');
+  const photoInput = document.getElementById('siteDeliveryPhoto');
+  const photoFile = photoInput && photoInput.files && photoInput.files[0];
   note.siteSignedBy = nameInput ? nameInput.value.trim() : (note.siteSignedBy || '');
   note.siteSignature = siteSig;
   note.siteSignedDate = todayStr();
+  note.siteSignedAt = new Date().toISOString();
+  const geo = await getSigningLocation(8000);
+  note.siteSignedGeo = geo || null;
+  if(photoFile) await uploadDeliveryPhoto(note, photoFile);
   save();
   render();
   exportDaySheet(true);
@@ -2982,7 +3158,7 @@ async function generateDocketImage(note){
   const printArea = document.getElementById('printArea');
   if(!printArea || !window.html2canvas) return null;
   try{
-    const canvas = await html2canvas(printArea, { backgroundColor: '#F3EEDF', scale: 2 });
+    const canvas = await html2canvas(printArea, { backgroundColor: '#F3EEDF', scale: 2, useCORS: true });
     const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
     if(!blob) return null;
     return new File([blob], `${note.number}.png`, { type: 'image/png' });
@@ -2997,10 +3173,20 @@ function noteTextLines(note){
     `Delivery note ${note.number}`,
     `Date: ${note.date}`,
     `To: ${note.customer}`,
-    isNoteComplete(note) ? 'Signed: Yes' : 'Signed: No',
+    isNoteComplete(note) ? `Signed: Yes${note.siteSignedBy ? ' — ' + note.siteSignedBy : ''}` : 'Signed: No',
     '',
-    ...note.items.map((x, i) => `${i + 1}. x${x.qty} ${x.type}`)
+    ...note.items.map((x, i) => `${i + 1}. x${x.qty} ${x.type}`),
+    ...(note.pdfUrl ? ['', `Signed delivery note (PDF): ${note.pdfUrl}`] : []),
+    ...(note.deliveryPhotoUrl ? [`Delivery photo: ${note.deliveryPhotoUrl}`] : [])
   ];
+}
+// Sends the client the real signed PDF (shared as a file where the phone
+// supports it — WhatsApp, email, etc.) and always includes the PDF link
+// in the text, so it still works on devices that can't attach files.
+async function makeNotePdfFile(note){
+  if(isNoteComplete(note) && !note.pdfUrl) await savePdfToFirebase(note);
+  const blob = await generateDocketPdfBlob();
+  return blob ? new File([blob], `Delivery note ${note.number} - ${note.customer}.pdf`, { type: 'application/pdf' }) : null;
 }
 
 async function shareWhatsApp(noteId){
@@ -3008,10 +3194,10 @@ async function shareWhatsApp(noteId){
   if(!note) return;
 
   if(navigator.share){
-    const file = await generateDocketImage(note);
+    const file = (await makeNotePdfFile(note)) || (await generateDocketImage(note));
     if(file && (!navigator.canShare || navigator.canShare({ files: [file] }))){
       try{
-        await navigator.share({ files: [file], title: `Delivery note ${note.number}`, text: `Delivery note ${note.number} — ${note.customer}` });
+        await navigator.share({ files: [file], title: `Delivery note ${note.number}`, text: noteTextLines(note).join('\n') });
         return;
       }catch(e){
         if(e && e.name === 'AbortError') return;
@@ -3020,6 +3206,7 @@ async function shareWhatsApp(noteId){
     }
   }
 
+  if(isNoteComplete(note) && !note.pdfUrl) await savePdfToFirebase(note);
   const text = noteTextLines(note).join('\n');
   window.open('https://wa.me/?text=' + encodeURIComponent(text), '_blank');
 }
@@ -3029,10 +3216,10 @@ async function shareEmail(noteId){
   if(!note) return;
 
   if(navigator.share){
-    const file = await generateDocketImage(note);
+    const file = (await makeNotePdfFile(note)) || (await generateDocketImage(note));
     if(file && (!navigator.canShare || navigator.canShare({ files: [file] }))){
       try{
-        await navigator.share({ files: [file], title: `Delivery note ${note.number}`, text: `Delivery note ${note.number} — ${note.customer}` });
+        await navigator.share({ files: [file], title: `Delivery note ${note.number}`, text: noteTextLines(note).join('\n') });
         return;
       }catch(e){
         if(e && e.name === 'AbortError') return;
@@ -3041,7 +3228,8 @@ async function shareEmail(noteId){
     }
   }
 
-  const subject = `Delivery note ${note.number}`;
+  if(isNoteComplete(note) && !note.pdfUrl) await savePdfToFirebase(note);
+  const subject = `Delivery note ${note.number} — ${note.customer}`;
   const body = noteTextLines(note).join('\n');
   window.location.href = 'mailto:?subject=' + encodeURIComponent(subject) + '&body=' + encodeURIComponent(body);
 }
@@ -3292,7 +3480,7 @@ function openSyncSettings(){
 function generateDocketPdfBlob(){
   const printArea = document.getElementById('printArea');
   if(!printArea || !window.html2canvas || !window.jspdf) return null;
-  return html2canvas(printArea, { backgroundColor: '#F3EEDF', scale: 2 }).then((canvas) => {
+  return html2canvas(printArea, { backgroundColor: '#F3EEDF', scale: 2, useCORS: true }).then((canvas) => {
     const imgData = canvas.toDataURL('image/png');
     const { jsPDF } = window.jspdf;
     const pdf = new jsPDF({ unit: 'px', format: [canvas.width, canvas.height] });
