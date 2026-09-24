@@ -3047,7 +3047,11 @@ function proofOfDeliveryHtml(note){
   }
   const photo = deliveryPhotoLocal[note.id] || note.deliveryPhotoUrl;
   return (bits.length ? `<div class="docket-pod" style="font-size:11px;margin-top:6px;opacity:.85;">${bits.join(' · ')}</div>` : '')
-    + (photo ? `<div class="docket-photo" style="margin-top:8px;"><img src="${photo}" crossorigin="anonymous" alt="Delivery photo" style="max-width:100%;max-height:260px;border-radius:6px;"><div class="sig-label">Delivery photo</div></div>` : '');
+    // No crossorigin attribute: Firebase Storage doesn't send CORS headers
+    // for downloads, so asking for them would stop the photo showing at all.
+    // The PDF made on the signing phone uses the in-memory copy; any later
+    // PDF still carries the link to the photo underneath.
+    + (photo ? `<div class="docket-photo" style="margin-top:8px;"><img src="${photo}" alt="Delivery photo" style="max-width:100%;max-height:260px;border-radius:6px;"><div class="sig-label">Delivery photo${note.deliveryPhotoUrl ? ` — <a href="${note.deliveryPhotoUrl}" target="_blank" rel="noopener">open full photo</a>` : ''}</div></div>` : '');
 }
 
 async function confirmSiteSignature(noteId){
