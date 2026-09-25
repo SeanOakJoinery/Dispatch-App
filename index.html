@@ -1065,6 +1065,11 @@ WHEN THE USER UPLOADS THIS FILE AGAIN
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-database-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-storage-compat.js"></script>
+<!-- Oak Core cutover 2026-09-25: shared login helpers (PIN hash, app list) from
+     the oak-core repo, same as Board Stock / Consumables / Stock List. Dispatch
+     keeps saving users inside its own merge-safe board save. Rollback: previous
+     index.html is in the backup-2026-09-25 folder next to this file. -->
+<script src="https://seanoakjoinery.github.io/oak-core/oak-core.js?v=2"></script>
 <script>
   const firebaseConfig = {
     apiKey: "AIzaSyCkoUkLIlxdxD2AAEpLGW4dzqkSeC5lVh0",
@@ -1587,6 +1592,8 @@ function escHtml(s){
 // short numeric PIN is crackable if someone gets the hash and really
 // wants it), but it's a meaningful step up from plaintext.
 async function hashPin(pin){
+  // Shared with the other three apps via oak-core; same SHA-256 hex as before.
+  if(window.OakCore && OakCore.hashPin) return OakCore.hashPin(pin);
   const enc = new TextEncoder().encode(pin);
   const buf = await crypto.subtle.digest('SHA-256', enc);
   return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
@@ -2342,6 +2349,9 @@ async function returnItemToStock(id){
             }
             si.qty = (Number(si.qty) || 0) + (d.deductQty || 0);
             if(d.deductQtyL) si.qtyL = (Number(si.qtyL) || 0) + d.deductQtyL;
+            // Stock List hides empty lines after a send ("hiddenAfterDispatch");
+            // stock is coming back, so show the line again.
+            if(si.hiddenAfterDispatch) si.hiddenAfterDispatch = false;
           });
           return stockItems;
         });
@@ -3601,7 +3611,7 @@ function showLoginScreen(){
   }
 
   layer.innerHTML = `<div class="login-card">
-    <h3>Who's this?</h3>
+    <h3>Who's this?${window.OakCore && OakCore.VERSION ? `<span style="font-size:11px;font-weight:400;opacity:.6;"> · oak-core ${OakCore.VERSION}</span>` : ''}</h3>
     <div class="hint">Pick your name to continue.</div>
     ${appUsers.map(u => `<button class="user-pick-btn" onclick="promptPin('${u.id}')">${escHtml(u.username)}${u.isRoot ? ' (root)' : ''}</button>`).join('')}
   </div>`;
