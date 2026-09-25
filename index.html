@@ -1069,7 +1069,9 @@ WHEN THE USER UPLOADS THIS FILE AGAIN
      the oak-core repo, same as Board Stock / Consumables / Stock List. Dispatch
      keeps saving users inside its own merge-safe board save. Rollback: previous
      index.html is in the backup-2026-09-25 folder next to this file. -->
-<script src="https://seanoakjoinery.github.io/oak-core/oak-core.js?v=2"></script>
+<script src="https://seanoakjoinery.github.io/oak-core/oak-core.js?v=3"></script>
+<script>/* ONE LOGIN (oak-core v3): no session on this device -> log in on the Oak Joinery home app first. Add ?local=1 to the URL to use this app's own login screen instead. */
+(function(){try{var S=window.OakCore&&OakCore.session;if(S&&!S.get()&&!S.localLoginAllowed())S.goHome({next:'dispatch'});}catch(e){}})();</script>
 <script>
   const firebaseConfig = {
     apiKey: "AIzaSyCkoUkLIlxdxD2AAEpLGW4dzqkSeC5lVh0",
@@ -3558,7 +3560,32 @@ function resetIdleTimer(){
   window.addEventListener(evt, () => { if(currentUserId) resetIdleTimer(); }, { passive: true });
 });
 
+
+// ===================== ONE LOGIN (oak-core v3) =====================
+// The Oak Joinery home app (/oak-core/) is the one login screen. This app
+// picks up who's logged in on this device; "Menu" goes back home.
+function ssoOn(){ return !!(window.OakCore && OakCore.session); }
+function ssoGoMenu(){ if(ssoOn()) OakCore.session.goHome(); }
+// Returns the logged-in user, or null (and heads home) if there isn't one.
+function ssoResolve(list){
+  if(!ssoOn()) return null;
+  const r = OakCore.session.resolve(list, APP_ID);
+  if(r.status === 'ok') return r.user;
+  if(r.status === 'wait' || OakCore.session.localLoginAllowed()) return null;
+  OakCore.session.goHome(r.status === 'denied' ? { denied: APP_ID } : { next: APP_ID });
+  return null;
+}
+
 async function checkLogin(){
+  const su = ssoResolve(users);
+  if(su){
+    currentUserId = su.id;
+    hideLoginOverlay();
+    resetIdleTimer();
+    renderUserBadge();
+    applyPermissionsToUi();
+    return;
+  }
   let savedId = null;
   try{
     const res = await storage.get('currentUserId', false);
@@ -3686,6 +3713,7 @@ async function attemptLogin(userId){
 
   delete loginAttempts[userId];
   currentUserId = u.id;
+  if(ssoOn()) OakCore.session.set(u);
   try{ await storage.set('currentUserId', u.id, false); }catch(e){}
   hideLoginOverlay();
   renderUserBadge();
@@ -3718,6 +3746,7 @@ async function createRootAccount(){
 }
 
 async function logoutUser(){
+  if(ssoOn() && !OakCore.session.localLoginAllowed()){ OakCore.session.clear(); OakCore.session.goHome({ logout: 1 }); return; }
   currentUserId = null;
   clearTimeout(idleTimer);
   try{ await storage.set('currentUserId', '', false); }catch(e){}
@@ -3730,7 +3759,7 @@ function renderUserBadge(){
   const el = document.getElementById('userBadge');
   if(!el) return;
   const u = getCurrentUser();
-  el.innerHTML = u ? `Logged in as <b>${escHtml(u.username)}</b>${u.isRoot ? ' (root)' : ''} · <button onclick="openChangeOwnPin()">Change PIN</button> · <button onclick="logoutUser()">Switch user</button>` : '';
+  el.innerHTML = u ? `Logged in as <b>${escHtml(u.username)}</b>${u.isRoot ? ' (root)' : ''} · <button onclick="openChangeOwnPin()">Change PIN</button> · <button onclick="ssoOn() ? ssoGoMenu() : logoutUser()">☰ Menu</button>` : '';
 }
 
 // Self-service PIN change — deliberately available to EVERY logged-in
@@ -3769,6 +3798,7 @@ async function saveOwnPin(){
     return;
   }
   u.pin = await hashPin(pin);
+  if(ssoOn()) OakCore.session.set(u); // keep this device logged in with the new PIN
   save();
   closeModal();
 }
