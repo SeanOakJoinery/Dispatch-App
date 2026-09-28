@@ -1778,11 +1778,15 @@ function openManageDrivers(){
       <h3>Manage drivers</h3>
       <div class="hint">Add or remove drivers from the suggestions list on delivery notes. Removing one doesn't affect notes that already have that driver's name saved.</div>
       <div style="max-height:280px;overflow:auto;display:flex;flex-direction:column;gap:4px;margin-bottom:14px;">
-        ${drivers.map((d, i) => `<div class="note-item-row" style="border-bottom:1px solid var(--line);"><span>${escHtml(d)}</span><button class="rm" onclick="removeDriverAt(${i})" title="Remove">&times;</button></div>`).join('')}
+        ${drivers.map((d, i) => `<div class="note-item-row" style="border-bottom:1px solid var(--line);gap:8px;align-items:center;"><span style="flex:1;">${escHtml(driverNameOf(d))}</span><input type="text" value="${escHtml(driverRegOf(d))}" placeholder="Reg" title="Vehicle reg — change and click away to save" onchange="setDriverRegAt(${i}, this.value)" style="width:120px;padding:4px 6px;"><button class="rm" onclick="removeDriverAt(${i})" title="Remove">&times;</button></div>`).join('')}
       </div>
       <div class="field">
         <label>New driver name</label>
         <input type="text" id="newDriverInput" placeholder="e.g. Thabo M." style="width:100%;">
+      </div>
+      <div class="field">
+        <label>Vehicle reg (fills in automatically when this driver is picked)</label>
+        <input type="text" id="newDriverRegInput" placeholder="e.g. CA 123-456" style="width:100%;">
       </div>
       <div id="driverErr" style="color:var(--rust);font-size:12px;margin-top:8px;display:none;"></div>
       <div class="modal-actions">
@@ -1803,12 +1807,12 @@ function addDriver(){
     err.style.display = 'block';
     return;
   }
-  if(drivers.includes(name)){
-    err.textContent = 'That driver already exists';
+  if(drivers.some(d => driverNameOf(d).toLowerCase() === name.toLowerCase())){
+    err.textContent = 'That driver already exists — change the reg next to their name instead';
     err.style.display = 'block';
     return;
   }
-  drivers.push(name);
+  drivers.push(driverEntry(name, document.getElementById('newDriverRegInput').value));
   save();
   renderDriverOptions();
   openManageDrivers();
@@ -1822,11 +1826,38 @@ function removeDriverAt(index){
   openManageDrivers();
 }
 
+// 2026-09-28: drivers can carry their vehicle reg, per user request ("when i
+// click name it auto fill the reg number"). Stored as "Name — REG" in the
+// same plain drivers list, so syncing and older entries (name only) keep
+// working unchanged. The dropdown shows the name with its reg, and picking
+// a name fills the matching vehicle-reg box on the note.
+const DRIVER_SEP = ' — ';
+function driverNameOf(d){ const s = String(d || ''); const i = s.lastIndexOf(DRIVER_SEP); return (i >= 0 ? s.slice(0, i) : s).trim(); }
+function driverRegOf(d){ const s = String(d || ''); const i = s.lastIndexOf(DRIVER_SEP); return i >= 0 ? s.slice(i + DRIVER_SEP.length).trim() : ''; }
+function driverEntry(name, reg){ name = String(name || '').trim(); reg = String(reg || '').trim().toUpperCase(); return reg ? name + DRIVER_SEP + reg : name; }
+function setDriverRegAt(index, reg){
+  if(!currentUserIsRoot() || !drivers[index]) return;
+  drivers[index] = driverEntry(driverNameOf(drivers[index]), reg);
+  save();
+  renderDriverOptions();
+}
 function renderDriverOptions(){
   const list = document.getElementById('driverList');
   if(!list) return;
-  list.innerHTML = drivers.map(d => `<option value="${escHtml(d)}"></option>`).join('');
+  list.innerHTML = drivers.map(d => `<option value="${escHtml(driverNameOf(d))}" label="${escHtml(driverRegOf(d) ? driverNameOf(d) + ' — ' + driverRegOf(d) : driverNameOf(d))}">${escHtml(driverRegOf(d))}</option>`).join('');
 }
+// Picking a driver from the list fills the vehicle reg next to it.
+const DRIVER_REG_PAIRS = { driverNameInput: 'vehicleRegInput', pendingDriverName: 'pendingVehicleReg', sdDriverName: 'sdVehicleReg' };
+function fillRegForDriver(e){
+  const regId = e.target && DRIVER_REG_PAIRS[e.target.id];
+  if(!regId) return;
+  const typed = e.target.value.trim().toLowerCase();
+  const hit = drivers.find(d => driverNameOf(d).toLowerCase() === typed);
+  const regInput = document.getElementById(regId);
+  if(hit && regInput && driverRegOf(hit)) regInput.value = driverRegOf(hit);
+}
+document.addEventListener('input', fillRegForDriver);
+document.addEventListener('change', fillRegForDriver);
 
 function specHtml(type){
   const s = SPECS[type];
