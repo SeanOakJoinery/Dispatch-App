@@ -1216,9 +1216,19 @@ WHEN THE USER UPLOADS THIS FILE AGAIN
   .docket-item .qty-col{flex-shrink:0;width:34px;text-align:center;font-weight:600;border-left:1px solid #B9AF93;border-right:1px solid #B9AF93;}
   .docket-item .desc-col{flex:1;min-width:0;overflow-wrap:anywhere;}
   .docket-item .spec{background:transparent;border:none;color:#5A5238;padding:2px 0 0;margin:0;}
-  .docket-sig{margin-top:16px;padding-top:12px;border-top:1px solid #B9AF93;}
-  .docket-sig img{display:block;max-width:220px;height:auto;}
-  .docket-sig .sig-label{font-family:var(--font-m);font-size:10px;color:#5A5238;text-transform:uppercase;letter-spacing:.06em;margin-top:4px;}
+  .docket-sig{padding-top:6px;}
+  .docket-sig img{display:block;max-width:100%;height:70px;object-fit:contain;object-position:left bottom;}
+  .docket-sig .sig-blank{height:70px;}
+  .docket-sig .sig-label{font-family:var(--font-m);font-size:10px;color:#5A5238;text-transform:uppercase;letter-spacing:.06em;margin-top:4px;border-top:1px solid #2A2519;padding-top:5px;}
+  .docket-sig .sig-when{font-family:var(--font-m);font-size:10px;color:#8a7f63;margin-top:2px;}
+  .docket-sigs{display:grid;grid-template-columns:1fr 1fr;gap:28px;margin-top:18px;padding-top:12px;border-top:1px solid #B9AF93;}
+  .docket-page{display:flex;flex-direction:column;}
+  .docket-page + .docket-page{margin-top:18px;}
+  .docket-bottom{margin-top:auto;}
+  .docket-foot{display:flex;justify-content:space-between;font-family:var(--font-m);font-size:9.5px;color:#8a7f63;margin-top:12px;}
+  .docket-cont{display:flex;justify-content:space-between;gap:10px;font-size:12px;color:#5A5238;border-bottom:2px solid #2A2519;padding-bottom:8px;}
+  /* fixed A4 pages while a PDF / picture is being made */
+  .pdf-mode .docket-page{width:794px !important;height:1123px !important;min-height:1123px !important;padding:48px 56px !important;box-shadow:none !important;margin:0 !important;}
 
   .sigwrap{background:#F3EEDF;border:1px solid var(--line);border-radius:4px;overflow:hidden;touch-action:none;}
   .sigwrap canvas{display:block;width:100%;height:120px;touch-action:none;}
@@ -1274,6 +1284,7 @@ WHEN THE USER UPLOADS THIS FILE AGAIN
     #noteBg .modal{max-width:880px !important;}
     #noteBg .docket{width:794px;max-width:100%;min-height:1123px;margin:0 auto;padding:48px 56px;box-shadow:0 6px 30px rgba(0,0,0,.45);border-radius:2px;}
     #noteBg .docket:before{left:56px;right:56px;}
+    #noteBg .docket-sig img, #noteBg .docket-sig .sig-blank{height:90px;}
     #noteBg .docket-head h3{font-size:32px;}
     #noteBg .docket-row, #noteBg .docket-driver-row{font-size:14px;}
     #noteBg .docket-items{font-size:15px;}
@@ -1281,11 +1292,13 @@ WHEN THE USER UPLOADS THIS FILE AGAIN
     #noteBg .add-item-row, #noteBg .field{max-width:794px;margin-left:auto;margin-right:auto;}
   }
   .note-back{background:none;border:none;color:var(--amber);font:inherit;font-size:14px;cursor:pointer;padding:0 0 12px;display:block;}
-  @page{size:A4;margin:12mm;}
+  @page{size:A4;margin:0;}
   @media print{
     body *{visibility:hidden;}
     #printArea, #printArea *{visibility:visible;}
-    #printArea{position:absolute;top:0;left:0;width:100%;min-height:0;box-shadow:none;}
+    #printArea{position:absolute;top:0;left:0;width:210mm;}
+    #printArea .docket-page{width:210mm !important;height:297mm !important;min-height:0 !important;margin:0 !important;padding:14mm 16mm !important;box-shadow:none !important;border:none !important;border-radius:0 !important;break-after:page;page-break-after:always;overflow:hidden;}
+    #printArea .docket-page:last-child{break-after:auto;page-break-after:auto;}
     .note-back{display:none;}
     .modal-actions{display:none;}
   }
@@ -1590,6 +1603,8 @@ function userHasApp(u, appId){
   return !!u.apps[appId];
 }
 
+// 2026-09-30: time of signing, shown under the signatures (e.g. "14:32").
+function timeStr(){ return new Date().toLocaleTimeString('en-GB', { hour:'2-digit', minute:'2-digit' }); }
 function todayStr(){
   const d = new Date();
   return d.toLocaleDateString('en-GB', {day:'2-digit', month:'long', year:'numeric'});
@@ -2802,24 +2817,40 @@ function viewNote(noteId){
     : ((note.driverName || note.vehicleReg || note.driverSignedDate)
       ? `<div class="docket-driver-row"><span>Driver: ${escHtml(note.driverName || '')}</span><span>${escHtml(note.driverSignedDate || '')}</span><span>${note.vehicleReg ? 'Reg: ' + escHtml(note.vehicleReg) : ''}</span></div>`
       : '');
+  // 2026-09-30: signatures sit side by side at the bottom of every A4 page —
+  // dispatched (left), client (right) — each with the name, then date and time.
+  const sigCell = (img, title, name, date, time) => `<div class="docket-sig">
+      ${img ? `<img src="${img}" alt="${title}">` : '<div class="sig-blank"></div>'}
+      <div class="sig-label">${title}${name ? ': <b>' + escHtml(name) + '</b>' : ''}</div>
+      <div class="sig-when">${date ? escHtml(date) + (time ? ' at ' + escHtml(time) : '') : '&nbsp;'}</div></div>`;
   const driverBlock = note.driverSignature
-    ? `<div class="docket-sig"><img src="${note.driverSignature}" alt="Driver signature"><div class="sig-label">Dispatched &amp; signed by driver</div></div>`
-    : (note.signature ? `<div class="docket-sig"><img src="${note.signature}" alt="Signature"><div class="sig-label">Received &amp; signed by ${escHtml(note.customer)}${note.date ? ' — ' + escHtml(note.date) : ''}</div></div>` : '');
+    ? sigCell(note.driverSignature, 'Dispatched &amp; signed by', note.driverName, note.driverSignedDate, note.driverSignedTime)
+    : (note.signature ? sigCell(note.signature, 'Received &amp; signed by', note.customer, note.date, '') : '');
   const siteBlock = note.siteSignature
-    ? `<div class="docket-sig"><img src="${note.siteSignature}" alt="Site signature"><div class="sig-label">${note.isCollection ? 'Collected &amp; signed by' : 'Received &amp; signed by'} ${escHtml(note.siteSignedBy || note.customer)}${note.siteSignedDate ? ' — ' + escHtml(note.siteSignedDate) : ''}</div></div>`
+    ? sigCell(note.siteSignature, note.isCollection ? 'Collected &amp; signed by' : 'Received &amp; signed by', note.siteSignedBy || note.customer, note.siteSignedDate, note.siteSignedTime)
     : '';
+  const sigRow = (driverBlock || siteBlock) ? `<div class="docket-sigs"><div>${driverBlock}</div><div>${siteBlock}</div></div>` : '';
 
   const editableItems = !complete || rootOverride;
-  const itemLines = note.items.map((x, i) => {
+  const itemLineHtml = (x, i) => {
     const removeBtn = (editableItems && note.items.length > 1)
       ? `<button class="rm" onclick="removeNoteItem('${note.id}','${x.stockItemId}')" title="Remove">&times;</button>`
       : '';
     const rmCol = editableItems ? `<span class="rm-col">${removeBtn}</span>` : '';
     return `<div class="${editableItems ? 'note-item-row' : 'docket-item'}"><span class="num-col">${i + 1}</span><span class="qty-col">${x.qty}</span><span class="desc-col">${x.type}</span>${rmCol}</div>`;
-  }).join('');
+  };
+  const itemLines = note.items.map(itemLineHtml).join('');
   const itemsHeader = `<div class="docket-items-header"><span class="num-col">#</span><span class="qty-col">Qty</span><span class="desc-col">Description</span></div>`;
 
-  const docketHtml = `<div class="docket" id="printArea">
+  // Split the items over A4 pages. Every page carries the full letterhead,
+  // heading, client and driver details, and the signatures at the bottom.
+  const PER_PAGE = 14;
+  const lineList = note.items.map((x, i) => itemLineHtml(x, i));
+  const pages = [];
+  for(let i = 0; i < Math.max(lineList.length, 1); i += PER_PAGE) pages.push(lineList.slice(i, i + PER_PAGE));
+  const pageCount = pages.length;
+  const pageFoot = (n) => `<div class="docket-foot"><span>${escHtml(note.number)}</span><span>Page ${n} of ${pageCount}</span></div>`;
+  const pageTop = `
         <div class="docket-letterhead header-card">
           <div class="lh-left">
             <div class="lh-name">Oak Joinery (Pty) Ltd</div>
@@ -2840,15 +2871,16 @@ function viewNote(noteId){
           <div class="docket-date"><span class="dd-label">Date</span><span class="dd-value">${note.date}</span></div>
         </div>
         <div class="docket-row docket-to"><span>To:</span><span>${escHtml(note.customer)}</span></div>
-        ${driverRow}
+        ${driverRow}`;
+  const docketHtml = `<div id="printArea" class="docket-doc">` + pages.map((lines, pi) => `<div class="docket docket-page">
+        ${pageTop}
         <div class="docket-items">
           ${itemsHeader}
-          ${itemLines}
+          ${lines.join('')}
         </div>
-        ${driverBlock}
-        ${siteBlock}
-        ${proofOfDeliveryHtml(note)}
-      </div>`;
+        ${pi === pageCount - 1 ? proofOfDeliveryHtml(note) : ''}
+        <div class="docket-bottom">${sigRow}${pageFoot(pi + 1)}</div>
+      </div>`).join('') + `</div>`;
 
   if(complete && !rootOverride){
     layer.innerHTML = `<div class="modal-bg" id="noteBg">
@@ -2964,6 +2996,7 @@ function confirmDriverSignaturePending(noteId){
   if(regInput) note.vehicleReg = regInput.value.trim();
   note.driverSignature = driverSig;
   note.driverSignedDate = todayStr();
+  note.driverSignedTime = timeStr();
   save();
   render();
   viewNote(noteId);
@@ -3181,6 +3214,7 @@ async function confirmSiteSignature(noteId){
   note.siteSignedBy = nameInput ? nameInput.value.trim() : (note.siteSignedBy || '');
   note.siteSignature = siteSig;
   note.siteSignedDate = todayStr();
+  note.siteSignedTime = timeStr();
   note.siteSignedAt = new Date().toISOString();
   const geo = await getSigningLocation(8000);
   note.siteSignedGeo = geo || null;
@@ -3256,8 +3290,8 @@ function saveEditedNote(noteId){
 
   const newDriver = getSignatureDataUrl('editDriverSig');
   const newSite = getSignatureDataUrl('editSiteSig');
-  if(newDriver) note.driverSignedDate = todayStr();
-  if(newSite) note.siteSignedDate = todayStr();
+  if(newDriver){ note.driverSignedDate = todayStr(); note.driverSignedTime = timeStr(); }
+  if(newSite){ note.siteSignedDate = todayStr(); note.siteSignedTime = timeStr(); }
   note.driverSignature = newDriver || note.driverSignature || null;
   note.siteSignature = newSite || note.siteSignature || note.signature || null;
   delete note.signature;
@@ -3272,7 +3306,10 @@ async function generateDocketImage(note){
   const printArea = document.getElementById('printArea');
   if(!printArea || !window.html2canvas) return null;
   try{
-    const canvas = await html2canvas(printArea, { backgroundColor: '#F3EEDF', scale: 2, useCORS: true });
+    printArea.classList.add('pdf-mode');
+    let canvas;
+    try { canvas = await html2canvas(printArea, { backgroundColor: '#F3EEDF', scale: 2, useCORS: true }); }
+    finally { printArea.classList.remove('pdf-mode'); }
     const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
     if(!blob) return null;
     return new File([blob], `${note.number}.png`, { type: 'image/png' });
@@ -3594,13 +3631,17 @@ function openSyncSettings(){
 function generateDocketPdfBlob(){
   const printArea = document.getElementById('printArea');
   if(!printArea || !window.html2canvas || !window.jspdf) return null;
-  return html2canvas(printArea, { backgroundColor: '#F3EEDF', scale: 2, useCORS: true }).then((canvas) => {
-    const imgData = canvas.toDataURL('image/png');
-    const { jsPDF } = window.jspdf;
-    const pdf = new jsPDF({ unit: 'px', format: [canvas.width, canvas.height] });
-    pdf.addImage(imgData, 'PNG', 0, 0, canvas.width, canvas.height);
-    return pdf.output('blob');
-  });
+  // One A4 page per delivery-note page, each with its signatures at the bottom.
+  printArea.classList.add('pdf-mode');
+  const pages = Array.from(printArea.querySelectorAll('.docket-page'));
+  const { jsPDF } = window.jspdf;
+  const pdf = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' });
+  return pages.reduce((p, pg, i) => p.then(() => html2canvas(pg, { backgroundColor: '#F3EEDF', scale: 2, useCORS: true }).then((canvas) => {
+      if(i > 0) pdf.addPage('a4', 'portrait');
+      pdf.addImage(canvas.toDataURL('image/jpeg', 0.92), 'JPEG', 0, 0, 210, 297);
+    })), Promise.resolve())
+    .then(() => pdf.output('blob'))
+    .finally(() => printArea.classList.remove('pdf-mode'));
 }
 
 async function savePdfToFirebase(note){
