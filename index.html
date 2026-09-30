@@ -1190,11 +1190,18 @@ WHEN THE USER UPLOADS THIS FILE AGAIN
   .header-card .lh-logo .lh-joinery{font-family:var(--font-b);font-weight:500;font-size:9.5px;letter-spacing:.38em;color:#F3EEDF;margin-top:5px;}
   .docket-letterhead{margin-bottom:16px;}
   .docket-num{font-family:var(--font-m);font-size:12px;color:#5A5238;}
-  .docket-date{font-family:var(--font-m);font-size:13px;border:1px solid #2A2519;border-radius:3px;padding:4px 9px;transform:rotate(-2deg);display:inline-block;}
+  /* 2026-09-30: date set straight and labelled, per Sean ("make the date straight and more professional") */
+  .docket-date{font-family:var(--font-b);font-size:13px;text-align:right;line-height:1.3;color:#2A2519;}
+  .docket-date .dd-label{display:block;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:#8a7f63;margin-bottom:2px;}
+  .docket-date .dd-value{font-weight:600;font-size:14px;}
   .docket{overflow:hidden;width:100%;}
   .docket-row{display:flex;justify-content:space-between;gap:10px;font-size:12px;color:#5A5238;margin-bottom:2px;}
   .docket-row span:first-child{flex-shrink:0;}
   .docket-row span:last-child{text-align:right;overflow-wrap:anywhere;}
+  /* 2026-09-30: client name right next to "To:" */
+  .docket-to{justify-content:flex-start;gap:8px;font-size:14px;color:#2A2519;}
+  .docket-to span:first-child{color:#5A5238;}
+  .docket-to span:last-child{text-align:left;font-weight:600;}
   .docket-driver-row{display:flex;justify-content:space-between;gap:10px;font-size:12px;color:#5A5238;margin:6px 0;padding-top:6px;border-top:1px solid #E3D8C4;}
   .docket-driver-row span:first-child{text-align:left;}
   .docket-driver-row span:nth-child(2){text-align:center;color:#8a7f63;}
@@ -1261,10 +1268,25 @@ WHEN THE USER UPLOADS THIS FILE AGAIN
   .user-row .acts button:hover{color:var(--amber);}
   .one-off-toggle{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:400;color:var(--muted);margin-top:5px;}
 
+  /* 2026-09-30: on a computer screen, a delivery note opens as a full A4 page,
+     the way it prints. Phones keep the compact view. */
+  @media (min-width: 900px){
+    #noteBg .modal{max-width:880px !important;}
+    #noteBg .docket{width:794px;max-width:100%;min-height:1123px;margin:0 auto;padding:48px 56px;box-shadow:0 6px 30px rgba(0,0,0,.45);border-radius:2px;}
+    #noteBg .docket:before{left:56px;right:56px;}
+    #noteBg .docket-head h3{font-size:32px;}
+    #noteBg .docket-row, #noteBg .docket-driver-row{font-size:14px;}
+    #noteBg .docket-items{font-size:15px;}
+    #noteBg .header-card{padding:22px 26px;}
+    #noteBg .add-item-row, #noteBg .field{max-width:794px;margin-left:auto;margin-right:auto;}
+  }
+  .note-back{background:none;border:none;color:var(--amber);font:inherit;font-size:14px;cursor:pointer;padding:0 0 12px;display:block;}
+  @page{size:A4;margin:12mm;}
   @media print{
     body *{visibility:hidden;}
     #printArea, #printArea *{visibility:visible;}
-    #printArea{position:absolute;top:0;left:0;width:100%;}
+    #printArea{position:absolute;top:0;left:0;width:100%;min-height:0;box-shadow:none;}
+    .note-back{display:none;}
     .modal-actions{display:none;}
   }
 </style>
@@ -2635,6 +2657,45 @@ function getSignatureDataUrl(canvasId){
 function closeModal(){
   document.getElementById('modalLayer').innerHTML = '';
   sigPads = {};
+  noteFromList = false;
+}
+// 2026-09-30: "Back to delivery notes" — a note opened from the Delivery
+// notes list gets a back button that returns to the list, with the same
+// sections still open, instead of closing everything.
+let noteFromList = false;
+let notesListState = { waiting:false, delivered:false, scroll:0 };
+// Every re-draw of an open note (after adding an item, signing, etc.) keeps the back button.
+const _viewNoteBase = viewNote;
+viewNote = function(noteId){ _viewNoteBase(noteId); addNoteBackButton(); };
+function openNoteFromList(id){
+  const bg = document.getElementById('allBg');
+  if(bg){
+    const d = bg.querySelectorAll('details');
+    notesListState = { waiting: !!(d[0] && d[0].open), delivered: !!(d[1] && d[1].open), scroll: (bg.querySelector('.notes-scroll') || {}).scrollTop || 0 };
+  }
+  viewNote(id);
+  noteFromList = true;
+  addNoteBackButton();
+}
+function addNoteBackButton(){
+  if(!noteFromList) return;
+  const m = document.querySelector('#noteBg .modal');
+  if(!m || m.querySelector('.note-back')) return;
+  const b = document.createElement('button');
+  b.className = 'note-back'; b.type = 'button'; b.textContent = '← Back to delivery notes';
+  b.onclick = backToNotesList;
+  m.insertBefore(b, m.firstChild);
+}
+function backToNotesList(){
+  noteFromList = false;
+  sigPads = {};
+  viewAllNotes();
+  const bg = document.getElementById('allBg');
+  if(!bg) return;
+  const d = bg.querySelectorAll('details');
+  if(d[0]) d[0].open = notesListState.waiting;
+  if(d[1]) d[1].open = notesListState.delivered;
+  const sc = bg.querySelector('.notes-scroll'); if(sc) sc.scrollTop = notesListState.scroll;
 }
 
 
@@ -2739,7 +2800,7 @@ function viewNote(noteId){
       ? `<div class="docket-driver-row"><span>Collected by: ${escHtml(note.siteSignedBy || '')}</span><span>${escHtml(note.siteSignedDate || '')}</span><span>Collection</span></div>`
       : `<div class="docket-driver-row"><span>Collection</span><span></span><span></span></div>`)
     : ((note.driverName || note.vehicleReg || note.driverSignedDate)
-      ? `<div class="docket-driver-row"><span>Driver: ${escHtml(note.driverName || '')}</span><span>${escHtml(note.driverSignedDate || '')}</span><span>${escHtml(note.vehicleReg || '')}</span></div>`
+      ? `<div class="docket-driver-row"><span>Driver: ${escHtml(note.driverName || '')}</span><span>${escHtml(note.driverSignedDate || '')}</span><span>${note.vehicleReg ? 'Reg: ' + escHtml(note.vehicleReg) : ''}</span></div>`
       : '');
   const driverBlock = note.driverSignature
     ? `<div class="docket-sig"><img src="${note.driverSignature}" alt="Driver signature"><div class="sig-label">Dispatched &amp; signed by driver</div></div>`
@@ -2776,9 +2837,9 @@ function viewNote(noteId){
             <h3>Delivery note</h3>
             <div class="docket-num">${note.number}</div>
           </div>
-          <div class="docket-date">${note.date}</div>
+          <div class="docket-date"><span class="dd-label">Date</span><span class="dd-value">${note.date}</span></div>
         </div>
-        <div class="docket-row"><span>To:</span><span>${escHtml(note.customer)}</span></div>
+        <div class="docket-row docket-to"><span>To:</span><span>${escHtml(note.customer)}</span></div>
         ${driverRow}
         <div class="docket-items">
           ${itemsHeader}
@@ -3310,7 +3371,7 @@ function viewAllNotes(){
     if(n.driverSignature) return ' &middot; awaiting site signature';
     return ' &middot; not yet signed';
   };
-  const noteCardHtml = (n) => `<div class="card" style="cursor:pointer;" onclick="viewNote('${n.id}')">
+  const noteCardHtml = (n) => `<div class="card" style="cursor:pointer;" onclick="openNoteFromList('${n.id}')">
     <div class="card-top"><div class="card-type" style="font-size:15px;">${n.number}</div><span class="card-qty">${n.date}</span></div>
     <div class="card-ref">${n.customer}${noteStatusHint(n)}</div>
   </div>`;
@@ -3325,7 +3386,7 @@ function viewAllNotes(){
   layer.innerHTML = `<div class="modal-bg" id="allBg"><div class="modal" style="max-width:460px;">
     <h3>Delivery notes</h3>
     <div class="hint">${state.notes.length} total</div>
-    <div style="max-height:420px;overflow:auto;">
+    <div class="notes-scroll" style="max-height:420px;overflow:auto;">
       ${groupHtml('Waiting for signature', waiting)}
       ${groupHtml('Delivered', delivered)}
     </div>
@@ -4124,6 +4185,107 @@ if(installBtn){
 }
 
 load();
+</script>
+<script>
+/* Oak Joinery — shared "← Back" button (2026-09-30, per Sean: "let's put back
+   buttons in all apps"). Adds a Back button next to every "☰ Menu" button and
+   makes the phone's own back button do the same thing. Back goes, in order:
+     1. out of an open pop-up (a delivery note opened from the list goes back
+        to the list),
+     2. to the previous screen in the app (Orders / Tools detail pages, or the
+        last tab you were on),
+     3. to the Oak Joinery menu.
+   Apps can tell it about their tabs with window.OAK_BACK_TABS = { get, set }. */
+(function(){
+  "use strict";
+  if (window.__oakBack) return; window.__oakBack = true;
+  var tabStack = [], lastTab = null, goingBack = false;
+
+  function visible(el){
+    if (!el || !el.isConnected) return false;
+    var cs = getComputedStyle(el);
+    if (cs.display === "none" || cs.visibility === "hidden") return false;
+    var r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0;
+  }
+  var OVERLAYS = "#noteBg, #allBg, .modal-bg, .modal-overlay, .mbg, #modal-root .modal-backdrop, #modal-root > div";
+  function topOverlay(){
+    var list = Array.prototype.slice.call(document.querySelectorAll(OVERLAYS)).filter(visible)
+      .filter(function(el){ return el.id !== "loginOverlay" && !el.closest("#loginOverlay") && !/login/i.test(el.id || ""); });
+    return list.length ? list[list.length - 1] : null;
+  }
+  function closeButtonIn(el){
+    var b = el.querySelector(".note-back");
+    if (b && visible(b)) return b;
+    var btns = Array.prototype.slice.call(el.querySelectorAll("button")).filter(visible);
+    return btns.find(function(x){ return /(^|\s)(close-x|modal-close)(\s|$)/.test(x.className) || x.id === "mCancel" || x.id === "modal-cancel"; }) ||
+           btns.find(function(x){ return /^\s*(cancel|close|done|back|×|✕)\s*$/i.test(x.textContent); }) || null;
+  }
+  function goMenu(){
+    try { if (window.OakCore && OakCore.session && OakCore.session.get()) { OakCore.session.goHome(); return; } } catch (e) {}
+    location.href = "https://seanoakjoinery.github.io/oak-core/";
+  }
+  function back(){
+    var ov = topOverlay();
+    if (ov){
+      var b = closeButtonIn(ov);
+      if (b){ b.click(); return true; }
+      if (typeof window.closeModal === "function"){ window.closeModal(); return true; }
+      ov.remove(); return true;
+    }
+    var link = Array.prototype.slice.call(document.querySelectorAll(".backlink#back, #back.backlink")).filter(visible)[0];
+    if (link){ link.click(); return true; }
+    var T = window.OAK_BACK_TABS;
+    if (T && tabStack.length){
+      goingBack = true;
+      var t = tabStack.pop(); lastTab = t;
+      try { T.set(t); } finally { goingBack = false; }
+      return true;
+    }
+    goMenu(); return false;
+  }
+  window.oakBack = back;
+
+  // Remember the tab you came from.
+  function trackTab(){
+    var T = window.OAK_BACK_TABS; if (!T) return;
+    var cur; try { cur = T.get(); } catch (e) { return; }
+    if (cur === undefined || cur === null) return;
+    if (lastTab !== null && cur !== lastTab && !goingBack){ tabStack.push(lastTab); if (tabStack.length > 30) tabStack.shift(); }
+    lastTab = cur;
+  }
+
+  // Put a Back button in front of every Menu button (apps redraw, so keep checking).
+  function addButtons(){
+    var menus = Array.prototype.slice.call(document.querySelectorAll("button, a")).filter(function(x){
+      return /☰\s*Menu/.test(x.textContent || "") && !x.dataset.oakBackDone;
+    });
+    menus.forEach(function(m){
+      m.dataset.oakBackDone = "1";
+      var b = document.createElement(m.tagName === "A" ? "button" : m.tagName);
+      b.type = "button";
+      b.className = m.className;
+      b.setAttribute("style", (m.getAttribute("style") || "") + ";margin-right:6px");
+      b.textContent = "← Back";
+      b.title = "Back to the previous screen";
+      b.addEventListener("click", function(e){ e.preventDefault(); e.stopPropagation(); back(); });
+      m.parentNode.insertBefore(b, m);
+    });
+  }
+  function tick(){ addButtons(); trackTab(); }
+  new MutationObserver(tick).observe(document.documentElement, { childList:true, subtree:true });
+  document.addEventListener("click", function(){ setTimeout(trackTab, 0); }, true);
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", tick); else tick();
+
+  // The phone's own back button does the same as the Back button.
+  try {
+    history.pushState({ oakBack:1 }, "");
+    window.addEventListener("popstate", function(){
+      var stay = back();
+      if (stay) history.pushState({ oakBack:1 }, "");
+    });
+  } catch (e) {}
+})();
 </script>
 </body>
 </html>
