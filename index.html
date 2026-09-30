@@ -1269,6 +1269,12 @@ WHEN THE USER UPLOADS THIS FILE AGAIN
   .user-badge button{background:none;border:none;color:var(--muted);text-decoration:underline;font-size:12px;cursor:pointer;padding:0;}
   .user-badge button:hover{color:var(--amber);}
   .perm-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px 14px;margin:14px 0;}
+  .perm-sec{border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-bottom:10px;}
+  .perm-sec-head{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;font-size:14px;font-weight:600;border-bottom:1px solid var(--line);padding-bottom:8px;}
+  .perm-sec-head label{display:flex;align-items:center;gap:7px;font-weight:600;font-size:14px;}
+  .perm-note{font-size:11px;font-weight:400;color:var(--muted);}
+  .perm-sec .perm-grid{margin:10px 0 2px;}
+  @media (max-width:520px){ .perm-grid{grid-template-columns:1fr;} }
   .perm-grid label{display:flex;align-items:center;gap:7px;font-size:13px;font-weight:400;}
   .user-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 0;border-bottom:1px solid var(--line);}
   .user-row .who{font-size:13px;}
@@ -1535,7 +1541,9 @@ function defaultPermissions(){
     consManageConsumables: false, // Not used by THIS app — Consumables
     consViewReports: false,       // Not used by THIS app — Consumables
     consExportExcel: false,       // Not used by THIS app — Consumables
-    consSendToDispatch: false     // Not used by THIS app — Consumables
+    consSendToDispatch: false,    // Not used by THIS app — Consumables
+    ordersQuotes: false,          // Not used by THIS app — Orders: add / upload quotes and orders (only the main root can tick it)
+    ordersApprove: false          // Not used by THIS app — Orders: approve quotes / send purchase orders (only the main root can tick it)
   };
 }
 
@@ -1567,10 +1575,11 @@ function currentUserIsRoot(){
 // APP_ID is the ONLY line that differs between the two apps' copies of
 // this block — keep them otherwise identical.
 const APP_ID = 'dispatch';
-const APP_LABELS = { dispatch: 'Dispatch app', stock: 'Stock List app', boardStock: 'Board Stock app', consumables: 'Consumables app' };
+// 2026-09-30: Orders, Stock In and Tools are given per user too, like the other apps.
+const APP_LABELS = { dispatch: 'Dispatch app', stock: 'Stock List app', boardStock: 'Board Stock app', consumables: 'Consumables app', orders: 'Orders app', stockIn: 'Stock In app', tools: 'Tools app' };
 
 function defaultApps(){
-  return { dispatch: true, stock: true, boardStock: true, consumables: true };
+  return { dispatch: true, stock: true, boardStock: true, consumables: true, orders: false, stockIn: false, tools: false };
 }
 
 // The main root is the board's original owner: the only account that can
@@ -3954,7 +3963,7 @@ function applyPermissionsToUi(){
   // visible to everyone rather than gated by manageSync like it used
   // to be when it opened a real API-key/Bin-ID configuration panel.
   set('syncBtn', true);
-  set('manageUsersBtn', can('manageUsers'));
+  set('manageUsersBtn', false); // 2026-09-30: users are managed only in the separate Users app
   render();
 }
 
@@ -3987,9 +3996,23 @@ const PERMISSION_LABELS = [
   ['consManageConsumables', 'Update container fill levels / liquid volumes (Consumables app)'],
   ['consViewReports', 'View reports (Consumables app)'],
   ['consExportExcel', 'Export to Excel (Consumables app)'],
-  ['consSendToDispatch', 'Send to Dispatch (Consumables app)']
+  ['consSendToDispatch', 'Send to Dispatch (Consumables app)'],
+  ['ordersQuotes', 'Add / upload quotes (Orders app) — main root only'],
+  ['ordersApprove', 'Approve quotes & send purchase orders (Orders app) — main root only']
 ];
 
+// 2026-09-30: user settings grouped per app — the app's access tick on top,
+// its permissions underneath (per Sean: "split it per app").
+const MAIN_ONLY_PERMS = ['ordersQuotes', 'ordersApprove'];
+const PERMISSION_GROUPS = [
+  { app: 'dispatch', title: 'Dispatch app', keys: ['addItems','removeItems','markFinished','moveItems','returnToStock','manageNotes','manageTypes','exportData','manageUsers'] },
+  { app: 'stock', title: 'Stock List app', keys: ['markBuilt','renameCategories','stockAddQty','stockRemoveQty','stockEditItems','copyJobs'] },
+  { app: 'boardStock', title: 'Board Stock app', keys: ['boardAddBoard','boardAddQty','boardRemoveQty','boardSendToDispatch','boardExportData','boardViewLog','boardSettings'] },
+  { app: 'consumables', title: 'Consumables app', keys: ['consManageItems','consHandOut','consManageConsumables','consViewReports','consExportExcel','consSendToDispatch'] },
+  { app: 'orders', title: 'Orders app', note: 'receiving deliveries uses the Add Stock ticks in Board Stock / Consumables', keys: ['ordersQuotes','ordersApprove'] },
+  { app: 'stockIn', title: 'Stock In app', note: 'adds to whichever of Board Stock / Consumables / Stock List they have Add Stock for', keys: [] },
+  { app: 'tools', title: 'Tools app', note: 'can sign tools out and in; only root adds, edits or removes tools', keys: [] }
+];
 function openManageUsers(editId){
   if(!can('manageUsers')) return;
   const layer = document.getElementById('modalLayer');
@@ -4030,15 +4053,17 @@ function openManageUsers(editId){
         <label>PIN</label>
         <input type="text" id="userFormPin" value="" placeholder="${editing ? 'Leave blank to keep current PIN' : 'At least 4 characters'}">
       </div>
-      <div style="font-size:12px;font-weight:600;margin-bottom:6px;">App access${iAmMainRoot ? '' : ' (main root only)'}</div>
-      <div class="perm-grid" style="${iAmMainRoot ? '' : 'opacity:.5;'}">
-        ${Object.keys(APP_LABELS).map(a => `<label><input type="checkbox" class="appCheck" data-app="${a}" ${apps[a] ? 'checked' : ''} ${iAmMainRoot ? '' : 'disabled'}> ${APP_LABELS[a]}</label>`).join('')}
-      </div>
       <label style="display:flex;align-items:center;gap:7px;font-size:13px;font-weight:400;margin:10px 0 6px;">
         <input type="checkbox" id="userFormRoot" ${editing && editing.isRoot ? 'checked' : ''}${editingMainRoot ? ' disabled' : ''}> Full access (root — can do everything in their apps)
       </label>
-      <div class="perm-grid" id="permGrid">
-        ${PERMISSION_LABELS.map(([key,label]) => `<label><input type="checkbox" class="permCheck" data-key="${key}" ${perms[key] ? 'checked' : ''}> ${label}</label>`).join('')}
+      <div class="hint" style="margin:0 0 8px;">Tick the apps this person can open${iAmMainRoot ? '' : ' (only the main root can change app access)'}, then what they may do in each.</div>
+      <div id="permGrid">
+        ${PERMISSION_GROUPS.map(g => `<div class="perm-sec">
+          <div class="perm-sec-head">${g.app ? `<label><input type="checkbox" class="appCheck" data-app="${g.app}" ${apps[g.app] ? 'checked' : ''} ${iAmMainRoot ? '' : 'disabled'}> ${escHtml(g.title)}</label>` : `<span>${escHtml(g.title)}</span>`}${g.note ? `<span class="perm-note">${escHtml(g.note)}</span>` : ''}</div>
+          <div class="perm-grid perm-sub"${g.keys.length ? '' : ' style="display:none"'}>
+            ${g.keys.map(key => { const lab = (PERMISSION_LABELS.find(x => x[0] === key) || [key, key])[1].replace(/\s*\((Stock List|Board Stock|Consumables|Orders) app\)/, '').replace(/ — main root only$/, ''); const mo = MAIN_ONLY_PERMS.includes(key) && !iAmMainRoot;
+              return `<label${mo ? ' style="opacity:.5"' : ''}><input type="checkbox" class="permCheck" data-key="${key}" ${perms[key] ? 'checked' : ''}${mo ? ' data-mainonly="1" disabled' : ''}> ${escHtml(lab)}${MAIN_ONLY_PERMS.includes(key) ? ' <span class="perm-note">(main root only)</span>' : ''}</label>`; }).join('')}
+          </div></div>`).join('')}
       </div>
       <div id="userFormErr" style="color:var(--rust);font-size:12px;margin-top:6px;display:none;"></div>
       <div class="modal-actions">
@@ -4050,8 +4075,8 @@ function openManageUsers(editId){
 
   const rootToggle = document.getElementById('userFormRoot');
   const applyRootLock = () => {
-    document.getElementById('permGrid').style.opacity = rootToggle.checked ? '.4' : '1';
-    document.querySelectorAll('.permCheck').forEach(cb => cb.disabled = rootToggle.checked);
+    document.querySelectorAll('#permGrid .perm-sub').forEach(g => g.style.opacity = rootToggle.checked ? '.4' : '1');
+    document.querySelectorAll('.permCheck').forEach(cb => cb.disabled = rootToggle.checked || cb.dataset.mainonly === '1');
   };
   rootToggle.addEventListener('change', applyRootLock);
   applyRootLock();
@@ -4090,7 +4115,8 @@ async function saveUserForm(editId){
   // but this makes it safe either way) isn't silently wiped on save.
   const existingUser = editId ? users.find(u => u.id === editId) : null;
   const permissions = existingUser ? {...defaultPermissions(), ...existingUser.permissions} : defaultPermissions();
-  document.querySelectorAll('.permCheck').forEach(cb => { permissions[cb.dataset.key] = cb.checked; });
+  // Approving orders can only be given or taken away by the main root.
+  document.querySelectorAll('.permCheck').forEach(cb => { if(cb.dataset.mainonly === '1') return; permissions[cb.dataset.key] = cb.checked; });
 
   // App access is main-root-only. For anyone else the checkboxes are
   // disabled, so we deliberately ignore the DOM and carry the existing
@@ -4145,7 +4171,8 @@ function deleteUser(userId){
   openManageUsers();
 }
 
-document.getElementById('manageUsersBtn').addEventListener('click', () => openManageUsers());
+// 2026-09-30: people and app access are now managed in the separate Users app.
+document.getElementById('manageUsersBtn').addEventListener('click', () => { location.href = 'https://seanoakjoinery.github.io/oak-core/users/'; });
 
 async function persistLocal(){
   try{
